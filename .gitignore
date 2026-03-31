@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/*.log
+
+# Data exports
+data/exports/
+
+# Environment secrets
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Configuration with secrets
+config/settings.yaml
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# MQL compiled files
+*.ex5
+*.ex4
