@@ -198,6 +198,42 @@ CREATE TABLE IF NOT EXISTS selected_symbols (
 CREATE INDEX IF NOT EXISTS idx_selected_active ON selected_symbols(is_active, selected_at DESC);
 
 -- ============================================
+-- Table: Open Positions (for tracking SELL)
+-- ============================================
+CREATE TABLE IF NOT EXISTS positions (
+    id BIGSERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    exchange VARCHAR(50) NOT NULL,
+    side VARCHAR(10) NOT NULL DEFAULT 'LONG',  -- LONG or SHORT
+    entry_price DECIMAL(20,8) NOT NULL,
+    quantity DECIMAL(30,8) NOT NULL,
+    cost_usdt DECIMAL(20,8) NOT NULL,
+    stop_loss DECIMAL(20,8),
+    take_profit DECIMAL(20,8),
+    trailing_stop_activated BOOLEAN DEFAULT false,
+    trailing_stop_price DECIMAL(20,8),
+    highest_price DECIMAL(20,8),
+    lowest_price DECIMAL(20,8),
+    unrealized_pnl DECIMAL(20,8),
+    unrealized_pnl_percent DECIMAL(10,4),
+    status VARCHAR(20) DEFAULT 'OPEN',  -- OPEN, CLOSED, STOPPED_OUT
+    opened_at TIMESTAMPTZ DEFAULT NOW(),
+    closed_at TIMESTAMPTZ,
+    close_price DECIMAL(20,8),
+    realized_pnl DECIMAL(20,8),
+    realized_pnl_percent DECIMAL(10,4),
+    signal_id BIGINT REFERENCES signals(id),
+    trade_id BIGINT REFERENCES trades(id),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol, exchange);
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+CREATE INDEX IF NOT EXISTS idx_positions_opened ON positions(opened_at DESC);
+
+-- ============================================
 -- Table: Agent Logs
 -- ============================================
 CREATE TABLE IF NOT EXISTS agent_logs (

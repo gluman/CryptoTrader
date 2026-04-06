@@ -243,6 +243,55 @@ async def tool_get_balance(exchange: str = "binance"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/tools/positions")
+async def tool_get_positions():
+    """Get all open positions"""
+    try:
+        positions = executor.get_all_open_positions()
+        result = [{
+            'id': p.id,
+            'symbol': p.symbol,
+            'exchange': p.exchange,
+            'entry_price': float(p.entry_price),
+            'quantity': float(p.quantity),
+            'stop_loss': float(p.stop_loss) if p.stop_loss else None,
+            'take_profit': float(p.take_profit) if p.take_profit else None,
+            'unrealized_pnl': float(p.unrealized_pnl) if p.unrealized_pnl else 0,
+            'unrealized_pnl_pct': float(p.unrealized_pnl_percent) if p.unrealized_pnl_percent else 0,
+            'trailing_stop_activated': p.trailing_stop_activated,
+            'trailing_stop_price': float(p.trailing_stop_price) if p.trailing_stop_price else None,
+            'status': p.status,
+            'opened_at': p.opened_at.isoformat() if p.opened_at else '',
+        } for p in positions]
+        return {"status": "success", "positions": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tools/ragflow/store_expert")
+async def tool_store_expert(request: ToolRequest):
+    """Store expert analysis in RAGFlow"""
+    try:
+        params = request.params or {}
+        symbol = params.get('symbol', 'BTCUSDT')
+        analysis = params.get('analysis', '')
+        source = params.get('source', 'manual')
+        
+        from src.gateways import RAGFlowAPI
+        ragflow_cfg = config.ragflow
+        ragflow = RAGFlowAPI(
+            base_url=ragflow_cfg.get('base_url', ''),
+            api_key=ragflow_cfg.get('api_key', ''),
+            dataset_id=ragflow_cfg.get('dataset_id'),
+            logger=logger
+        )
+        
+        result = ragflow.store_expert_analysis(symbol, analysis, source)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== Data Export Tools ====================
 
 @app.post("/tools/export")

@@ -6,9 +6,11 @@ from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
 from ..core.database import DatabaseManager, NewsRaw
+from ..gateways import RAGFlowAPI
+
 
 class SentimentAgent(BaseAgent):
-    """Analyzes news sentiment using OpenRouter LLM"""
+    """Analyzes news sentiment and stores in RAGFlow"""
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager):
         super().__init__('Sentiment', logger)
@@ -19,6 +21,16 @@ class SentimentAgent(BaseAgent):
         self.model = config.openrouter['model']
         self.temperature = config.openrouter.get('temperature', 0.3)
         self.max_tokens = config.openrouter.get('max_tokens', 1024)
+        
+        # Initialize RAGFlow
+        ragflow_cfg = config.ragflow
+        self.ragflow = RAGFlowAPI(
+            base_url=ragflow_cfg.get('base_url', ''),
+            api_key=ragflow_cfg.get('api_key', ''),
+            dataset_id=ragflow_cfg.get('dataset_id'),
+            logger=logger
+        )
+        self.ragflow_enabled = bool(ragflow_cfg.get('api_key'))
     
     def call_llm(self, prompt: str) -> str:
         """Call OpenRouter API"""
@@ -32,7 +44,7 @@ class SentimentAgent(BaseAgent):
             'model': self.model,
             'messages': [{'role': 'user', 'content': prompt}],
             'temperature': self.temperature,
-            'max_tokens': 100,  # We only need a number
+            'max_tokens': 100,
         }
         
         try:
@@ -59,9 +71,8 @@ Sentiment score:"""
         
         try:
             result = self.call_llm(prompt)
-            # Extract number from response
             score = float(result.replace('"', '').strip())
-            return max(-1.0, min(1.0, score))  # Clamp
+            return max(-1.0, min(1.0, score))
         except (ValueError, TypeError):
             return 0.0
     
@@ -81,6 +92,7 @@ Sentiment score:"""
                     'title': n.title,
                     'summary': n.summary or '',
                     'source': n.source,
+                    'url': n.url,
                 }
                 for n in news
             ]
@@ -123,25 +135,41 @@ Sentiment score:"""
             }
     
     def run_once(self) -> Dict[str, Any]:
-        """Analyze sentiment for unanalyzed news"""
+        """Analyze sentiment and store in RAGFlow"""
         self.log('info', "Starting sentiment analysis...")
         
         news = self.get_unanalyzed_news()
         
         analyzed = 0
+        stored_in_rag = 0
+        
         for item in news:
             score = self.analyze_sentiment(item['title'], item['summary'])
             self.update_sentiment(item['id'], score)
             analyzed += 1
             self.log('debug', f"Analyzed: {item['title'][:50]}... = {score}")
+            
+            # Store in RAGFlow
+            if self.ragflow_enabled:
+                try:
+                    self.ragflow.store_news(
+                        title=item['title'],
+                        summary=item['summary'],
+                        source=item['source'],
+                        url=item['url'],
+                        sentiment=score,
+                    )
+                    stored_in_rag += 1
+                except Exception as e:
+                    self.log('warning', f"Failed to store news in RAGFlow: {e}")
         
-        # Get aggregated sentiment
         aggregated = self.get_aggregated_sentiment()
         
-        self.log('info', f"Analyzed {analyzed} news items, avg sentiment: {aggregated['avg_sentiment']}")
+        self.log('info', f"Analyzed {analyzed} news, {stored_in_rag} stored in RAG, avg sentiment: {aggregated['avg_sentiment']}")
         
         return {
             'analyzed': analyzed,
+            'stored_in_rag': stored_in_rag,
             'aggregated': aggregated,
             'timestamp': datetime.utcnow().isoformat(),
         }

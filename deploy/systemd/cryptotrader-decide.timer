@@ -1,0 +1,12 @@
+[Unit]
+Description=CryptoTrader Trading Decisions Timer
+Requires=cryptotrader-decide.service
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=1h
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

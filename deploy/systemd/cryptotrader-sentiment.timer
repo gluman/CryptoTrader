@@ -1,0 +1,12 @@
+[Unit]
+Description=CryptoTrader Sentiment Analysis Timer
+Requires=cryptotrader-sentiment.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

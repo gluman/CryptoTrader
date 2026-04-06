@@ -1,0 +1,207 @@
+#!/bin/bash
+# ============================================
+# CryptoTrader - Service Control Script
+# ============================================
+
+APP_NAME="cryptotrader"
+APP_DIR="/opt/${APP_NAME}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+SERVICES=(
+    "cryptotrader-api"
+    "cryptotrader-scheduler"
+    "cryptotrader-monitor"
+)
+
+show_usage() {
+    echo ""
+    echo -e "${BLUE}CryptoTrader Service Manager${NC}"
+    echo ""
+    echo "Usage: $0 <command>"
+    echo ""
+    echo "Commands:"
+    echo "  start       Start all services"
+    echo "  stop        Stop all services"
+    echo "  restart     Restart all services"
+    echo "  status      Show service status"
+    echo "  logs        Show live logs (all services)"
+    echo "  logs-api    Show API logs only"
+    echo "  logs-sched  Show scheduler logs only"
+    echo "  health      Check system health"
+    echo "  config      Edit configuration"
+    echo "  shell       Open shell as cryptotrader user"
+    echo "  update      Update from git and restart"
+    echo ""
+}
+
+start_services() {
+    echo -e "${GREEN}Starting CryptoTrader services...${NC}"
+    for svc in "${SERVICES[@]}"; do
+        echo "  Starting ${svc}..."
+        sudo systemctl start "${svc}.service"
+    done
+    echo -e "${GREEN}Done${NC}"
+}
+
+stop_services() {
+    echo -e "${YELLOW}Stopping CryptoTrader services...${NC}"
+    for svc in "${SERVICES[@]}"; do
+        echo "  Stopping ${svc}..."
+        sudo systemctl stop "${svc}.service"
+    done
+    echo -e "${YELLOW}Done${NC}"
+}
+
+restart_services() {
+    echo -e "${YELLOW}Restarting CryptoTrader services...${NC}"
+    for svc in "${SERVICES[@]}"; do
+        echo "  Restarting ${svc}..."
+        sudo systemctl restart "${svc}.service"
+    done
+    echo -e "${GREEN}Done${NC}"
+}
+
+show_status() {
+    echo ""
+    echo -e "${BLUE}=== CryptoTrader Service Status ===${NC}"
+    echo ""
+    for svc in "${SERVICES[@]}"; do
+        status=$(systemctl is-active "${svc}.service" 2>/dev/null)
+        enabled=$(systemctl is-enabled "${svc}.service" 2>/dev/null)
+        
+        if [[ "${status}" == "active" ]]; then
+            color="${GREEN}"
+        else
+            color="${RED}"
+        fi
+        
+        printf "  %-35s ${color}%-10s${NC} %s\n" "${svc}" "${status}" "(${enabled})"
+    done
+    echo ""
+    
+    # System resources
+    echo -e "${BLUE}=== System Resources ===${NC}"
+    echo ""
+    echo "  Memory:"
+    free -h | head -2 | tail -1 | awk '{printf "    Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
+    echo ""
+    echo "  Disk:"
+    df -h /opt/cryptotrader 2>/dev/null | tail -1 | awk '{printf "    Total: %s | Used: %s | Available: %s | Use: %s\n", $2, $3, $4, $5}'
+    echo ""
+}
+
+show_logs() {
+    echo -e "${BLUE}Showing logs (Ctrl+C to exit)...${NC}"
+    sudo journalctl -u cryptotrader-api -u cryptotrader-scheduler -u cryptotrader-monitor -f
+}
+
+show_api_logs() {
+    echo -e "${BLUE}Showing API logs (Ctrl+C to exit)...${NC}"
+    sudo journalctl -u cryptotrader-api -f
+}
+
+show_sched_logs() {
+    echo -e "${BLUE}Showing scheduler logs (Ctrl+C to exit)...${NC}"
+    sudo journalctl -u cryptotrader-scheduler -f
+}
+
+check_health() {
+    echo ""
+    echo -e "${BLUE}=== Health Check ===${NC}"
+    echo ""
+    
+    # API health
+    echo -n "  API Server: "
+    if curl -s http://localhost:8000/health >/dev/null 2>&1; then
+        echo -e "${GREEN}OK${NC}"
+        curl -s http://localhost:8000/health | jq '.' 2>/dev/null || curl -s http://localhost:8000/health
+    else
+        echo -e "${RED}NOT RESPONDING${NC}"
+    fi
+    echo ""
+    
+    # Database
+    echo -n "  PostgreSQL: "
+    if sudo -u cryptotrader "${APP_DIR}/.venv/bin/python" -c "
+import sys; sys.path.insert(0, '${APP_DIR}')
+from src.core.config import Config
+from src.core.database import DatabaseManager
+import logging
+config = Config.load()
+db = DatabaseManager(config.postgresql, logging.getLogger())
+print('OK' if db.test_connection() else 'FAILED')
+" 2>/dev/null | grep -q "OK"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAILED${NC}"
+    fi
+    echo ""
+}
+
+edit_config() {
+    sudo nano "${APP_DIR}/.env"
+}
+
+open_shell() {
+    sudo -u cryptotrader -i
+}
+
+update_app() {
+    echo -e "${BLUE}Updating CryptoTrader...${NC}"
+    cd "${APP_DIR}"
+    
+    sudo -u cryptotrader git pull
+    
+    sudo -u cryptotrader "${APP_DIR}/.venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
+    
+    restart_services
+    
+    echo -e "${GREEN}Update complete${NC}"
+}
+
+# Main
+case "$1" in
+    start)
+        start_services
+        ;;
+    stop)
+        stop_services
+        ;;
+    restart)
+        restart_services
+        ;;
+    status)
+        show_status
+        ;;
+    logs)
+        show_logs
+        ;;
+    logs-api)
+        show_api_logs
+        ;;
+    logs-sched)
+        show_sched_logs
+        ;;
+    health)
+        check_health
+        ;;
+    config)
+        edit_config
+        ;;
+    shell)
+        open_shell
+        ;;
+    update)
+        update_app
+        ;;
+    *)
+        show_usage
+        exit 1
+        ;;
+esac

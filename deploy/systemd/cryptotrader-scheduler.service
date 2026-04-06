@@ -1,0 +1,41 @@
+[Unit]
+Description=CryptoTrader Scheduler (collect, sentiment, decide, execute)
+Documentation=https://github.com/cryptotrader
+After=network.target postgresql.service cryptotrader-api.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=cryptotrader
+Group=cryptotrader
+WorkingDirectory=/opt/cryptotrader
+Environment="PATH=/opt/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/cryptotrader/.env
+
+ExecStart=/opt/cryptotrader/.venv/bin/python /opt/cryptotrader/scheduler.py
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=15
+StartLimitInterval=120
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-scheduler
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cryptotrader/logs
+ReadOnlyPaths=/opt/cryptotrader/config
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

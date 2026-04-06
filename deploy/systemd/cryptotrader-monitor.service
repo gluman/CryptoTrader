@@ -1,0 +1,27 @@
+[Unit]
+Description=CryptoTrader Health Monitor
+Documentation=https://github.com/cryptotrader
+After=network.target cryptotrader-api.service cryptotrader-scheduler.service
+
+[Service]
+Type=simple
+User=cryptotrader
+Group=cryptotrader
+WorkingDirectory=/opt/cryptotrader
+Environment="PATH=/opt/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/cryptotrader/.env
+
+ExecStart=/opt/cryptotrader/.venv/bin/python /opt/cryptotrader/monitor.py
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-monitor
+
+[Install]
+WantedBy=multi-user.target

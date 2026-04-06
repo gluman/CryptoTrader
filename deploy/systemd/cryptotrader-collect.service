@@ -1,0 +1,16 @@
+[Unit]
+Description=CryptoTrader Data Collection
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=cryptotrader
+Group=cryptotrader
+WorkingDirectory=/opt/cryptotrader
+Environment="PATH=/opt/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/cryptotrader/.env
+
+ExecStart=/opt/cryptotrader/.venv/bin/python /opt/cryptotrader/main.py --task collect
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-collect

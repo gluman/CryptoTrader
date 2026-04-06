@@ -1,0 +1,12 @@
+[Unit]
+Description=CryptoTrader Execution Timer
+Requires=cryptotrader-execute.service
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

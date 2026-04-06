@@ -7,11 +7,13 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
-from ..core.database import DatabaseManager, OHLCVRaw, Signal, Decision
-from ..sentiment.sentiment_agent import SentimentAgent
+from ..core.database import DatabaseManager, OHLCVRaw, Signal, Decision, Position
+from ..agents.sentiment_agent import SentimentAgent
+from ..gateways import RAGFlowAPI
+
 
 class TradingDecisionAgent(BaseAgent):
-    """LLM-based trading decision agent using PostgreSQL data + RAGFlow context"""
+    """LLM-based trading decision agent with RAGFlow context"""
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager, 
                  sentiment_agent: SentimentAgent):
@@ -23,6 +25,16 @@ class TradingDecisionAgent(BaseAgent):
         self.api_base = config.openrouter['base_url']
         self.model = config.openrouter['model']
         self.min_confidence = config.agents.get('trading_decision', {}).get('min_confidence', 0.6)
+        
+        # Initialize RAGFlow
+        ragflow_cfg = config.ragflow
+        self.ragflow = RAGFlowAPI(
+            base_url=ragflow_cfg.get('base_url', ''),
+            api_key=ragflow_cfg.get('api_key', ''),
+            dataset_id=ragflow_cfg.get('dataset_id'),
+            logger=logger
+        )
+        self.ragflow_enabled = bool(ragflow_cfg.get('api_key'))
     
     def get_ohlcv_data(self, symbol: str, exchange: str = 'binance', 
                        timeframe: str = '1h', limit: int = 200) -> pd.DataFrame:
@@ -48,10 +60,12 @@ class TradingDecisionAgent(BaseAgent):
     
     def calculate_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Calculate technical indicators"""
-        if df.empty:
+        if df.empty or len(df) < 50:
             return {}
         
         close = df['close']
+        high = df['high']
+        low = df['low']
         
         # SMA
         sma_20 = close.rolling(20).mean().iloc[-1]
@@ -73,8 +87,6 @@ class TradingDecisionAgent(BaseAgent):
         macd_hist = macd - macd_signal
         
         # ATR
-        high = df['high']
-        low = df['low']
         prev_close = close.shift(1)
         tr = pd.concat([
             high - low,
@@ -93,11 +105,8 @@ class TradingDecisionAgent(BaseAgent):
         vol_sma = df['volume'].rolling(20).mean().iloc[-1]
         vol_ratio = df['volume'].iloc[-1] / vol_sma if vol_sma > 0 else 1.0
         
-        # CSS (simplified version)
-        ma_period = 20
-        ma = close.rolling(ma_period).mean()
-        slope = (ma - ma.shift(1)) / atr if atr > 0 else 0
-        css = slope.iloc[-1]
+        # CSS (Currency Slope Strength) — full implementation
+        css_result = self._calculate_css(close, atr)
         
         return {
             'price': float(close.iloc[-1]),
@@ -111,10 +120,56 @@ class TradingDecisionAgent(BaseAgent):
             'bb_upper': float(bb_upper),
             'bb_lower': float(bb_lower),
             'bb_middle': float(bb_middle),
-            'css_value': float(css),
+            'css_value': css_result['css'],
+            'css_prior': css_result['css_prior'],
+            'css_trend': css_result['trend'],
+            'css_cross_up': css_result['cross_up'],
+            'css_cross_down': css_result['cross_down'],
             'volume_ratio': float(vol_ratio),
             'volume_sma': float(vol_sma),
             'bars_count': len(df),
+        }
+    
+    def _calculate_css(self, close: pd.Series, atr: float) -> Dict[str, Any]:
+        """Calculate Currency Slope Strength (CSS)
+        
+        CSS = normalized MA slope / ATR
+        Measures trend strength normalized by volatility
+        """
+        ma_period = self.config.css_indicator.get('sma_period', 20)
+        
+        # Calculate moving average
+        ma = close.rolling(ma_period).mean()
+        
+        # Calculate slope (difference from previous bar)
+        if atr > 0:
+            slope = (ma - ma.shift(1)) / atr
+        else:
+            slope = ma - ma.shift(1)
+        
+        # Normalize to -1..+1 range
+        css_current = float(slope.iloc[-1])
+        css_prior = float(slope.iloc[-2]) if len(slope) > 1 else 0.0
+        
+        # Determine trend direction
+        if css_current > 0.05:
+            trend = 'BULLISH'
+        elif css_current < -0.05:
+            trend = 'BEARISH'
+        else:
+            trend = 'NEUTRAL'
+        
+        # Detect crossovers through the trade level
+        level = self.config.css_indicator.get('level_trade', 0.20)
+        cross_up = css_prior < level and css_current >= level
+        cross_down = css_prior > -level and css_current <= -level
+        
+        return {
+            'css': round(css_current, 6),
+            'css_prior': round(css_prior, 6),
+            'trend': trend,
+            'cross_up': cross_up,
+            'cross_down': cross_down,
         }
     
     def get_recent_signals(self, symbol: str, hours: int = 24) -> List[Dict]:
@@ -134,26 +189,64 @@ class TradingDecisionAgent(BaseAgent):
                 'reasoning': s.reasoning or '',
             } for s in signals]
     
+    def get_open_positions_for_symbol(self, symbol: str) -> List[Dict]:
+        """Get open positions for a symbol"""
+        with self.db.get_session() as session:
+            positions = session.query(Position).filter_by(
+                symbol=symbol, status='OPEN'
+            ).all()
+            
+            return [{
+                'id': p.id,
+                'entry_price': float(p.entry_price),
+                'quantity': float(p.quantity),
+                'stop_loss': float(p.stop_loss) if p.stop_loss else None,
+                'take_profit': float(p.take_profit) if p.take_profit else None,
+                'unrealized_pnl_pct': float(p.unrealized_pnl_percent) if p.unrealized_pnl_percent else 0,
+                'opened_at': p.opened_at.isoformat() if p.opened_at else '',
+            } for p in positions]
+    
     def build_prompt(self, symbol: str, indicators: Dict, sentiment: Dict,
-                     recent_signals: List[Dict]) -> str:
-        """Build LLM prompt for trading decision"""
+                     recent_signals: List[Dict], positions: List[Dict],
+                     rag_context: str = '') -> str:
+        """Build LLM prompt for trading decision with RAG context"""
         
         signal_history = "\n".join([
             f"  - {s['timestamp']}: {s['signal']} (conf={s['confidence']:.0%})"
             for s in recent_signals
         ]) or "  No recent signals"
         
+        position_info = ""
+        if positions:
+            pos = positions[0]
+            position_info = f"""
+## Open Position
+- Entry: ${pos['entry_price']:,.4f}
+- Quantity: {pos['quantity']:.6f}
+- SL: ${pos['stop_loss']:,.4f if pos['stop_loss'] else 0}
+- TP: ${pos['take_profit']:,.4f if pos['take_profit'] else 0}
+- Unrealized PnL: {pos['unrealized_pnl_pct']:.2f}%"""
+        else:
+            position_info = "\n## Open Position\n- No open position"
+        
+        rag_section = ""
+        if rag_context:
+            rag_section = f"""
+## Expert Knowledge & Context (from RAG)
+{rag_context[:2000]}"""
+        
         prompt = f"""You are an expert crypto trader. Analyze the data and provide a trading signal.
 
 ## Market Data for {symbol}
-- Price: ${indicators.get('price', 0):,.2f}
-- SMA 20: ${indicators.get('sma_20', 0):,.2f}
-- SMA 50: ${indicators.get('sma_50', 0):,.2f}
+- Price: ${indicators.get('price', 0):,.4f}
+- SMA 20: ${indicators.get('sma_20', 0):,.4f}
+- SMA 50: ${indicators.get('sma_50', 0):,.4f}
 - RSI 14: {indicators.get('rsi_14', 0):.1f}
-- MACD: {indicators.get('macd', 0):.4f} (signal: {indicators.get('macd_signal', 0):.4f})
-- ATR 14: ${indicators.get('atr_14', 0):,.2f}
-- Bollinger: [{indicators.get('bb_lower', 0):,.2f} - {indicators.get('bb_upper', 0):,.2f}]
-- CSS: {indicators.get('css_value', 0):.4f}
+- MACD: {indicators.get('macd', 0):.6f} (signal: {indicators.get('macd_signal', 0):.6f}, hist: {indicators.get('macd_hist', 0):.6f})
+- ATR 14: ${indicators.get('atr_14', 0):,.4f}
+- Bollinger: [{indicators.get('bb_lower', 0):,.4f} - {indicators.get('bb_upper', 0):,.4f}]
+- CSS: {indicators.get('css_value', 0):.6f} (trend: {indicators.get('css_trend', 'N/A')})
+- CSS cross up: {indicators.get('css_cross_up', False)}, cross down: {indicators.get('css_cross_down', False)}
 - Volume ratio: {indicators.get('volume_ratio', 0):.2f}x
 
 ## Sentiment (24h)
@@ -163,13 +256,17 @@ class TradingDecisionAgent(BaseAgent):
 
 ## Recent Signals
 {signal_history}
+{position_info}
+{rag_section}
 
 ## Rules
-1. BUY when: CSS crosses up through 0.20, RSI < 70, bullish sentiment, price above SMA 50
-2. SELL when: CSS crosses down through 0.20, RSI > 30, bearish sentiment
-3. HOLD when: conflicting signals, low confidence, or waiting for confirmation
+1. BUY when: CSS crosses UP through 0.20, RSI < 70, bullish sentiment, price > SMA50
+2. SELL when: CSS crosses DOWN through -0.20, RSI > 30, bearish sentiment, OR when take-profit/stop-loss conditions are met
+3. HOLD when: conflicting signals, low confidence, waiting for confirmation
 4. Do NOT buy if RSI > 70 (overbought)
-5. Do NOT sell if RSI < 30 (oversold)
+5. Do NOT sell if RSI < 30 (oversold) — wait for bounce
+6. If there is an open position, consider taking profits or cutting losses based on PnL and indicators
+7. Use expert knowledge from RAG context if relevant
 
 ## Response Format (JSON only, no other text)
 {{"signal": "BUY" or "SELL" or "HOLD", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}"""
@@ -201,8 +298,14 @@ class TradingDecisionAgent(BaseAgent):
             result = resp.json()
             content = result['choices'][0]['message']['content'].strip()
             
-            # Parse JSON from response
-            decision = json.loads(content)
+            # Try to parse JSON from response
+            # Handle cases where LLM wraps JSON in markdown
+            if content.startswith('```'):
+                content = content.split('```')[1]
+                if content.startswith('json'):
+                    content = content[4:]
+            
+            decision = json.loads(content.strip())
             decision['latency_ms'] = int(latency)
             decision['tokens'] = result.get('usage', {}).get('total_tokens', 0)
             
@@ -216,10 +319,10 @@ class TradingDecisionAgent(BaseAgent):
             }
     
     def save_decision(self, symbol: str, exchange: str, timeframe: str,
-                      indicators: Dict, sentiment: Dict, decision: Dict):
-        """Save signal and decision to database"""
+                      indicators: Dict, sentiment: Dict, decision: Dict,
+                      rag_context: str = '') -> int:
+        """Save signal and decision to database, return signal_id"""
         with self.db.get_session() as session:
-            # Create signal
             signal = Signal(
                 symbol=symbol,
                 exchange=exchange,
@@ -242,13 +345,14 @@ class TradingDecisionAgent(BaseAgent):
             )
             session.add(signal)
             session.flush()
+            signal_id = signal.id
             
-            # Create decision log
             decision_log = Decision(
-                signal_id=signal.id,
+                signal_id=signal_id,
                 timestamp=datetime.utcnow(),
                 market_data_json=indicators,
                 sentiment_data_json=sentiment,
+                news_context=rag_context[:2000] if rag_context else None,
                 llm_model=self.model,
                 decision_json=decision,
                 latency_ms=decision.get('latency_ms', 0),
@@ -256,7 +360,7 @@ class TradingDecisionAgent(BaseAgent):
             )
             session.add(decision_log)
             
-            return signal.id
+            return signal_id
     
     def run_once_for_symbol(self, symbol: str, exchange: str = 'binance',
                             timeframe: str = '1h') -> Dict[str, Any]:
@@ -276,17 +380,44 @@ class TradingDecisionAgent(BaseAgent):
         # 4. Get recent signals
         recent = self.get_recent_signals(symbol)
         
-        # 5. Build prompt and call LLM
-        prompt = self.build_prompt(symbol, indicators, sentiment, recent)
+        # 5. Get open positions
+        positions = self.get_open_positions_for_symbol(symbol)
+        
+        # 6. Get RAG context
+        rag_context = ''
+        if self.ragflow_enabled:
+            try:
+                rag_context = self.ragflow.get_trading_context(
+                    symbol, 
+                    f"trading analysis {symbol} buy sell decision"
+                )
+                self.log('debug', f"RAG context length: {len(rag_context)} chars")
+            except Exception as e:
+                self.log('warning', f"RAGFlow retrieval failed: {e}")
+        
+        # 7. Build prompt and call LLM
+        prompt = self.build_prompt(symbol, indicators, sentiment, recent, positions, rag_context)
         decision = self.call_llm(prompt)
         
-        # 6. Check minimum confidence
+        # 8. Check minimum confidence
         if decision['confidence'] < self.min_confidence:
             decision['signal'] = 'HOLD'
             decision['reasoning'] = f"Low confidence ({decision['confidence']:.0%} < {self.min_confidence:.0%})"
         
-        # 7. Save to database
-        signal_id = self.save_decision(symbol, exchange, timeframe, indicators, sentiment, decision)
+        # 9. Save to database
+        signal_id = self.save_decision(symbol, exchange, timeframe, indicators, sentiment, decision, rag_context)
+        
+        # 10. Store decision in RAGFlow for future reference
+        if self.ragflow_enabled and decision['signal'] != 'HOLD':
+            try:
+                self.ragflow.store_trading_journal(
+                    symbol=symbol,
+                    action=decision['signal'],
+                    price=indicators.get('price', 0),
+                    reasoning=decision.get('reasoning', ''),
+                )
+            except Exception as e:
+                self.log('warning', f"Failed to store journal in RAGFlow: {e}")
         
         self.log('info', f"{symbol}: {decision['signal']} (conf={decision['confidence']:.0%})")
         
@@ -298,20 +429,21 @@ class TradingDecisionAgent(BaseAgent):
             'signal_id': signal_id,
             'indicators': indicators,
             'sentiment': sentiment,
+            'positions': positions,
+            'rag_context_length': len(rag_context),
         }
     
     def run_once(self) -> Dict[str, Any]:
         """Generate decisions for all active symbols"""
         self.log('info', "Starting trading decision cycle...")
         
-        # Get active symbols
-        from ..core.database import SelectedSymbol
         with self.db.get_session() as session:
+            from ..core.database import SelectedSymbol
             symbols = session.query(SelectedSymbol).filter_by(is_active=True).all()
-            symbol_names = [s.symbol for s in symbols][:10]  # Limit to 10
+            symbol_names = [s.symbol for s in symbols][:10]
         
         if not symbol_names:
-            symbol_names = ['BTCUSDT', 'ETHUSDT']  # Default
+            symbol_names = ['BTCUSDT', 'ETHUSDT']
         
         decisions = []
         for sym in symbol_names:
@@ -321,7 +453,6 @@ class TradingDecisionAgent(BaseAgent):
             except Exception as e:
                 self.log('error', f"Decision failed for {sym}: {e}")
         
-        # Count signals
         buys = sum(1 for d in decisions if d.get('signal') == 'BUY')
         sells = sum(1 for d in decisions if d.get('signal') == 'SELL')
         holds = sum(1 for d in decisions if d.get('signal') == 'HOLD')
