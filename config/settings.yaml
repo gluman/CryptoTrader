@@ -1,0 +1,216 @@
+# ============================================
+# CryptoTrader Configuration
+# ============================================
+# Keys are loaded from .env file via environment variables
+
+# ============================================
+# Binance Exchange
+# ============================================
+binance:
+  base_url: "https://api.binance.com"
+  testnet_url: "https://testnet.binance.vision"
+  websocket_url: "wss://stream.binance.com:9443"
+  testnet: false
+  rate_limit:
+    orders_per_second: 10
+    requests_per_minute: 1200
+
+# ============================================
+# Bybit Exchange
+# ============================================
+bybit:
+  base_url: "https://api.bybit.com"
+  testnet_url: "https://api-testnet.bybit.com"
+  testnet: false
+  recv_window: 5000
+  rate_limit:
+    orders_per_second: 10
+    requests_per_minute: 600
+
+# ============================================
+# Bitfinex Exchange
+# ============================================
+bitfinex:
+  base_url: "https://api-pub.bitfinex.com"
+  auth_url: "https://api.bitfinex.com"
+  testnet: false
+  rate_limit:
+    requests_per_second: 10
+    requests_per_minute: 90
+
+# ============================================
+# CoinEx Exchange
+# ============================================
+coinex:
+  base_url: "https://api.coinex.com"
+  testnet: false
+  rate_limit:
+    requests_per_second: 10
+    requests_per_minute: 300
+
+# ============================================
+# Telegram Bot
+# ============================================
+telegram:
+  enabled: true
+  notify_on:
+    - error
+    - trade_executed
+    - signal_strong
+
+# ============================================
+# CoinDesk API
+# ============================================
+coindesk:
+  base_url: "https://api.coindesk.com/v1"
+
+# ============================================
+# CryptoRank API
+# ============================================
+cryptorank:
+  base_url: "https://api.cryptorank.io/v2"
+
+# ============================================
+# OpenRouter LLM
+# ============================================
+openrouter:
+  base_url: "https://openrouter.ai/api/v1"
+  model: "meta-llama/llama-3.3-70b-instruct:free"
+  temperature: 0.3
+  max_tokens: 1024
+
+# ============================================
+# PostgreSQL
+# ============================================
+postgresql:
+  host: "192.168.0.194"
+  port: 5432
+  database: "cryptotrader"
+  username: "cryptotrader"
+  pool_size: 10
+  max_overflow: 20
+
+# ============================================
+# RAGFlow
+# ============================================
+ragflow:
+  base_url: "http://192.168.0.186:9380"
+  # Single dataset for all crypto trading data
+  dataset_id: "dcaa90d231d711f199937e8f52fe67f3"
+
+# ============================================
+# AnythingLLM
+# ============================================
+anythingllm:
+  base_url: "http://192.168.0.133:3001"
+  enabled: true
+
+# ============================================
+# RSS News Feeds
+# ============================================
+rss_feeds:
+  - name: "ForkLog"
+    url: "https://forklog.com/feed"
+    language: "ru"
+    enabled: true
+  - name: "Bits.Media"
+    url: "https://bits.media/feed/"
+    language: "ru"
+    enabled: true
+  - name: "CoinDesk"
+    url: "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    language: "en"
+    enabled: true
+  - name: "CoinTelegraph"
+    url: "https://cointelegraph.com/rss"
+    language: "en"
+    enabled: true
+  - name: "Bitcoin Magazine"
+    url: "https://bitcoinmagazine.com/feed"
+    language: "en"
+    enabled: true
+  - name: "The Block"
+    url: "https://www.theblock.co/rss"
+    language: "en"
+    enabled: true
+
+# ============================================
+# Exchange Selection Criteria
+# ============================================
+selection_criteria:
+  min_volume_24h: 50000000          # $50M
+  min_change_1h: 2.0                # 2% за час
+  max_spread_percent: 0.1           # 0.1%
+  quote_currency: "USDT"
+
+# ============================================
+# CSS Indicator (Currency Slope Strength)
+# ============================================
+css_indicator:
+  lookback: 200
+  level_trade: 0.20
+  sma_filter: true
+  sma_period: 50
+  timeframes:
+    - "4h"
+    - "1h"
+
+# ============================================
+# Timeframes
+# ============================================
+timeframes:
+  - "1m"
+  - "5m"
+  - "15m"
+  - "1h"
+  - "4h"
+  - "1d"
+
+# ============================================
+# Agent Schedule
+# ============================================
+agents:
+  data_collector:
+    enabled: true
+    schedule_minutes: 10
+    lookback_days: 7
+  sentiment:
+    enabled: true
+    schedule_minutes: 30
+  trading_decision:
+    enabled: true
+    event_driven: true
+    min_confidence: 0.6
+  risk:
+    enabled: true
+    max_position_percent: 5
+    max_daily_loss_percent: 3
+    default_stop_loss_percent: 2.0
+    default_take_profit_percent: 4.0
+    risk_reward_ratio: 2.0
+    trailing_stop_enabled: true
+    trailing_stop_activation_percent: 1.5
+    trailing_stop_distance_percent: 1.0
+  executor:
+    enabled: true
+    testnet_first: true
+    confirmation_required: true
+
+# ============================================
+# Export Settings
+# ============================================
+export:
+  format: "xlsx"
+  directory: "data/exports"
+  auto_after_backtest: true
+  include_indicators: true
+
+# ============================================
+# Logging
+# ============================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/cryptotrader.log"
+  max_bytes: 10485760
+  backup_count: 5
