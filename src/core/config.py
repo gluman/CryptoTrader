@@ -82,7 +82,7 @@ class Config:
         
         # RAGFlow
         self._data.setdefault('ragflow', {})
-        self._data['ragflow']['base_url'] = os.getenv('RAGFLOW_BASE_URL', 'http://192.168.0.156:9380')
+        self._data['ragflow']['base_url'] = os.getenv('RAGFLOW_BASE_URL', 'http://192.168.0.186:9380')
         self._data['ragflow']['api_key'] = os.getenv('RAGFLOW_API_KEY', '')
         
         # AnythingLLM

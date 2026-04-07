@@ -96,7 +96,7 @@ class SentimentAgent(BaseAgent):
             if 'choices' not in result or not result['choices']:
                 self.log('error', f"LLM API returned no choices: {result}")
                 return "0.0"
-                
+            
             return result['choices'][0]['message']['content'].strip()
         except Exception as e:
             self.log('error', f"LLM call failed: {e}")
@@ -190,13 +190,18 @@ Sentiment score:"""
         """Analyze sentiment and store in RAGFlow"""
         self.log('info', "Starting sentiment analysis...")
         
-        news = self.get_unanalyzed_news()
+        news_items = self.get_unanalyzed_news()
+        
+        if not news_items:
+            self.log('info', "No unanalyzed news found")
+            return {'analyzed': 0}
         
         analyzed = 0
         stored_in_rag = 0
         
-        for item in news:
+        for item in news_items:
             score = self.analyze_sentiment(item['title'], item['summary'])
+            
             self.update_sentiment(item['id'], score)
             analyzed += 1
             self.log('debug', f"Analyzed: {item['title'][:50]}... = {score}")
@@ -213,7 +218,7 @@ Sentiment score:"""
                     )
                     stored_in_rag += 1
                 except Exception as e:
-                    self.log('warning', f"Failed to store news in RAGFlow: {e}")
+                    self.log('warning', f"Failed to store news in RAG: {e}")
         
         aggregated = self.get_aggregated_sentiment()
         

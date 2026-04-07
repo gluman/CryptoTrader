@@ -9,6 +9,7 @@ Config._instance = None
 from src.core.database import DatabaseManager
 from src.core.logger import setup_logger
 from src.agents import DataCollectorAgent, SentimentAgent, TradingDecisionAgent, ExecutionAgent
+from src.agents.telegram_notifier import TelegramNotifier
 
 config = Config.load()
 logger = setup_logger('run', level='INFO', log_file=config.logging.get('file'))
@@ -21,6 +22,18 @@ print(f"Binance testnet: {config.binance.get('testnet')}")
 print(f"Model: {config.openrouter.get('model')}")
 print("=" * 60)
 
+# Init Telegram notifier
+telegram = TelegramNotifier(
+    bot_token=config.telegram.get('bot_token', ''),
+    chat_id=config.telegram.get('chat_id', ''),
+    logger=logger
+)
+# Verify Telegram connection
+if telegram.verify_connection():
+    logger.info("Telegram bot connected successfully")
+else:
+    logger.warning("Telegram bot not configured or connection failed")
+
 # Init
 db = DatabaseManager(config.postgresql, logger)
 db.create_tables()
@@ -30,42 +43,62 @@ data_collector = DataCollectorAgent(config, logger, db)
 trading = TradingDecisionAgent(config, logger, db, sentiment)
 executor = ExecutionAgent(config, logger, db)
 
-# Step 1: Collect data
-print("\n[1/4] Collecting market data...")
-collect_result = data_collector.run_once()
-print(f"  Symbols: {collect_result.get('symbols_selected', 0)}")
-print(f"  OHLCV records: {collect_result.get('ohlcv_records', 0)}")
-print(f"  News: {collect_result.get('news_records', 0)}")
+try:
+    # Step 1: Collect data
+    print("\n[1/4] Collecting market data...")
+    collect_result = data_collector.run_once()
+    print(f"  Symbols: {collect_result.get('symbols_selected', 0)}")
+    print(f"  OHLCV records: {collect_result.get('ohlcv_records', 0)}")
+    print(f"  News: {collect_result.get('news_records', 0)}")
+    
+    # Step 2: Sentiment
+    print("\n[2/4] Analyzing sentiment...")
+    sentiment_result = sentiment.run_once()
+    print(f"  Analyzed: {sentiment_result.get('analyzed', 0)}")
+    agg = sentiment_result.get('aggregated', {})
+    print(f"  Avg sentiment: {agg.get('avg_sentiment', 0):.3f}")
+    print(f"  Bullish ratio: {agg.get('bullish_ratio', 0):.0%}")
+    
+    # Step 3: Trading decisions
+    print("\n[3/4] Generating trading decisions...")
+    decision_result = trading.run_once()
+    summary = decision_result.get('summary', {})
+    print(f"  BUY: {summary.get('buys', 0)}")
+    print(f"  SELL: {summary.get('sells', 0)}")
+    print(f"  HOLD: {summary.get('holds', 0)}")
+    
+    # Step 4: Execute
+    print("\n[4/4] Executing trades...")
+    exec_result = executor.run_once()
+    print(f"  Executed: {exec_result.get('executed', 0)}")
+    print(f"  SL/TP triggered: {exec_result.get('sl_tp_triggered', 0)}")
+    
+    positions = executor.get_all_open_positions()
+    if positions:
+        print(f"\n  Open positions ({len(positions)}):")
+        for p in positions:
+            print(f"    {p.symbol}: entry={float(p.entry_price):.2f}, qty={float(p.quantity):.6f}")
+            print(f"      SL={float(p.stop_loss) if p.stop_loss else 'N/A'}, TP={float(p.take_profit) if p.take_profit else 'N/A'}")
+    
+    print("\n" + "=" * 60)
+    print("PIPELINE COMPLETE")
+    print("=" * 60)
+    
+    # Send success notification
+    if telegram.chat_id:
+        telegram.send_message(
+            f"✅ <b>Pipeline completed successfully</b>\n"
+            f"Symbols: {collect_result.get('symbols_selected', 0)}\n"
+            f"OHLCV: {collect_result.get('ohlcv_records', 0)}\n"
+            f"News: {collect_result.get('news_records', 0)}\n"
+            f"Sentiment: {agg.get('avg_sentiment', 0):.3f}\n"
+            f"Signals: BUY {summary.get('buys', 0)}, SELL {summary.get('sells', 0)}\n"
+            f"Trades: {exec_result.get('executed', 0)}\n"
+            f"Open positions: {len(positions)}"
+        )
 
-# Step 2: Sentiment
-print("\n[2/4] Analyzing sentiment...")
-sentiment_result = sentiment.run_once()
-print(f"  Analyzed: {sentiment_result.get('analyzed', 0)}")
-agg = sentiment_result.get('aggregated', {})
-print(f"  Avg sentiment: {agg.get('avg_sentiment', 0):.3f}")
-print(f"  Bullish ratio: {agg.get('bullish_ratio', 0):.0%}")
-
-# Step 3: Trading decisions
-print("\n[3/4] Generating trading decisions...")
-decision_result = trading.run_once()
-summary = decision_result.get('summary', {})
-print(f"  BUY: {summary.get('buys', 0)}")
-print(f"  SELL: {summary.get('sells', 0)}")
-print(f"  HOLD: {summary.get('holds', 0)}")
-
-# Step 4: Execute
-print("\n[4/4] Executing trades...")
-exec_result = executor.run_once()
-print(f"  Executed: {exec_result.get('executed', 0)}")
-print(f"  SL/TP triggered: {exec_result.get('sl_tp_triggered', 0)}")
-
-positions = executor.get_all_open_positions()
-if positions:
-    print(f"\n  Open positions ({len(positions)}):")
-    for p in positions:
-        print(f"    {p.symbol}: entry={float(p.entry_price):.2f}, qty={float(p.quantity):.6f}")
-        print(f"      SL={float(p.stop_loss) if p.stop_loss else 'N/A'}, TP={float(p.take_profit) if p.take_profit else 'N/A'}")
-
-print("\n" + "=" * 60)
-print("PIPELINE COMPLETE")
-print("=" * 60)
+except Exception as e:
+    logger.exception("Pipeline failed")
+    # Send error notification
+    telegram.notify_error('Pipeline', str(e))
+    raise

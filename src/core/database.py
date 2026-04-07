@@ -2,7 +2,7 @@ import logging
 from decimal import Decimal as PyDecimal
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, Column, BigInteger, String, DateTime, Boolean, Integer, Text, JSON, Numeric
+from sqlalchemy import create_engine, Column, BigInteger, String, DateTime, Boolean, Integer, Text, JSON, Numeric, UniqueConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
@@ -29,6 +29,11 @@ class OHLCVRaw(Base):
     quote_volume = Column(Numeric(30, 8))
     trades_count = Column(Integer)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    
+    __table_args__ = (
+        # Unique constraint for ON CONFLICT to work
+        UniqueConstraint('exchange', 'symbol', 'timeframe', 'timestamp', name='uix_ohlcv_unique'),
+    )
 
 class OHLCVProcessed(Base):
     __tablename__ = 'ohlcv_processed'
@@ -247,8 +252,30 @@ class DatabaseManager:
             session.close()
     
     def create_tables(self):
-        """Create all tables"""
+        """Create all tables and ensure constraints"""
         Base.metadata.create_all(self.engine)
+        
+        # Ensure unique constraint on ohlcv_raw for ON CONFLICT to work
+        with self.engine.connect() as conn:
+            # Check if constraint exists
+            result = conn.execute(text("""
+                SELECT conname 
+                FROM pg_constraint 
+                WHERE conname = 'uix_ohlcv_unique' 
+                AND conrelid = 'ohlcv_raw'::regclass;
+            """)).fetchone()
+            
+            if not result:
+                conn.execute(text("""
+                    ALTER TABLE ohlcv_raw 
+                    ADD CONSTRAINT uix_ohlcv_unique 
+                    UNIQUE (exchange, symbol, timeframe, timestamp);
+                """))
+                conn.commit()
+                self.logger.info("Added unique constraint uix_ohlcv_unique on ohlcv_raw")
+            else:
+                self.logger.debug("Constraint uix_ohlcv_unique already exists")
+        
         self.logger.info("All database tables created")
     
     def drop_tables(self):

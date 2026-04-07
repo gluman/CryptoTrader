@@ -1,0 +1,28 @@
+[Unit]
+Description=CryptoTrader API Server
+Documentation=https://github.com/cryptotrader
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=andy
+Group=andy
+WorkingDirectory=/home/andy/CryptoTrader
+Environment="PATH=/home/andy/cryptotrader-venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/andy/CryptoTrader/.env
+
+ExecStart=/home/andy/cryptotrader-venv/bin/python /home/andy/CryptoTrader/main.py --task api
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-api
+
+[Install]
+WantedBy=multi-user.target

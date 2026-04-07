@@ -15,6 +15,10 @@ from ..gateways import RAGFlowAPI
 class TradingDecisionAgent(BaseAgent):
     """LLM-based trading decision agent with RAGFlow context"""
     
+    # Ollama fallback server
+    OLLAMA_BASE = "http://192.168.0.94:11434"
+    OLLAMA_MODEL = "qwen3.5:9b"
+    
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager, 
                  sentiment_agent: SentimentAgent):
         super().__init__('TradingDecision', logger)
@@ -274,7 +278,21 @@ class TradingDecisionAgent(BaseAgent):
         return prompt
     
     def call_llm(self, prompt: str) -> Dict[str, Any]:
-        """Call OpenRouter for decision"""
+        """Call OpenRouter for decision with Ollama fallback"""
+        
+        # Try OpenRouter first
+        try:
+            result = self._call_openrouter(prompt)
+            if result:
+                return result
+        except Exception as e:
+            self.log('warning', f"OpenRouter failed: {e}, trying Ollama...")
+        
+        # Fallback to Ollama
+        return self._call_ollama(prompt)
+    
+    def _call_openrouter(self, prompt: str) -> Dict[str, Any]:
+        """Call OpenRouter API"""
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
@@ -287,31 +305,61 @@ class TradingDecisionAgent(BaseAgent):
             'max_tokens': self.config.openrouter.get('max_tokens', 512),
         }
         
+        start = datetime.utcnow()
+        resp = requests.post(
+            f"{self.api_base}/chat/completions",
+            headers=headers, json=data, timeout=60
+        )
+        latency = (datetime.utcnow() - start).total_seconds() * 1000
+        
+        result = resp.json()
+        content = result['choices'][0]['message']['content'].strip()
+        
+        # Try to parse JSON from response
+        if content.startswith('```'):
+            content = content.split('```')[1]
+            if content.startswith('json'):
+                content = content[4:]
+        
+        decision = json.loads(content.strip())
+        decision['latency_ms'] = int(latency)
+        decision['tokens'] = result.get('usage', {}).get('total_tokens', 0)
+        
+        return decision
+    
+    def _call_ollama(self, prompt: str) -> Dict[str, Any]:
+        """Call Ollama API as fallback"""
         try:
-            start = datetime.utcnow()
+            data = {
+                'model': self.OLLAMA_MODEL,
+                'prompt': prompt,
+                'temperature': self.config.openrouter.get('temperature', 0.3),
+                'max_tokens': 512,
+                'format': 'json',
+            }
             resp = requests.post(
-                f"{self.api_base}/chat/completions",
-                headers=headers, json=data, timeout=60
+                f"{self.OLLAMA_BASE}/api/generate",
+                json=data,
+                timeout=120
             )
-            latency = (datetime.utcnow() - start).total_seconds() * 1000
             
             result = resp.json()
-            content = result['choices'][0]['message']['content'].strip()
+            content = result.get('response', '{}').strip()
             
-            # Try to parse JSON from response
-            # Handle cases where LLM wraps JSON in markdown
+            # Parse JSON
             if content.startswith('```'):
                 content = content.split('```')[1]
                 if content.startswith('json'):
                     content = content[4:]
             
             decision = json.loads(content.strip())
-            decision['latency_ms'] = int(latency)
-            decision['tokens'] = result.get('usage', {}).get('total_tokens', 0)
+            decision['latency_ms'] = 0
+            decision['tokens'] = 0
+            decision['source'] = 'ollama'
             
             return decision
         except Exception as e:
-            self.log('error', f"LLM decision failed: {e}")
+            self.log('error', f"Ollama call failed: {e}")
             return {
                 'signal': 'HOLD',
                 'confidence': 0.0,

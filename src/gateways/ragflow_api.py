@@ -19,6 +19,7 @@ class RAGFlowAPI:
         self.session.headers.update({
             'Authorization': f'Bearer {api_key}',
         })
+        self.logger.info(f"RAGFlow API initialized with base_url={self.base_url}, dataset_id={self.dataset_id or 'not set'}")
         # Note: Content-Type is NOT set here - it's handled automatically for multipart uploads
     
     def _request(self, method: str, endpoint: str, **kwargs) -> Dict:

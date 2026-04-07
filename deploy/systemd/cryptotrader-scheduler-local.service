@@ -1,0 +1,28 @@
+[Unit]
+Description=CryptoTrader Scheduler (collect, sentiment, decide, execute)
+Documentation=https://github.com/cryptotrader
+After=network.target cryptotrader-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=andy
+Group=andy
+WorkingDirectory=/home/andy/CryptoTrader
+Environment="PATH=/home/andy/cryptotrader-venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/andy/CryptoTrader/.env
+
+ExecStart=/home/andy/cryptotrader-venv/bin/python /home/andy/CryptoTrader/scheduler.py
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=15
+StartLimitInterval=120
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-scheduler
+
+[Install]
+WantedBy=multi-user.target
