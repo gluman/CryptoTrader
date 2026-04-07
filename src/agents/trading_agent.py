@@ -351,9 +351,7 @@ class TradingDecisionAgent(BaseAgent):
                 content = result.get('response', '{}').strip()
                 
                 # Extract JSON from response (handle markdown and extra text)
-                import re
-                
-                # Remove markdown code blocks
+                # Remove markdown code blocks first
                 if content.startswith('```'):
                     parts = content.split('```')
                     if len(parts) >= 2:
@@ -361,14 +359,25 @@ class TradingDecisionAgent(BaseAgent):
                         if content.lower().startswith('json'):
                             content = content[4:].strip()
                 
-                # Find JSON object in text
+                # Find the first valid JSON object
                 if not content.startswith('{'):
+                    start = content.find('{')
+                    if start != -1:
+                        content = content[start:]
+                
+                # Try to decode JSON precisely
+                try:
+                    decision, end = json.JSONDecoder().raw_decode(content)
+                    content = content[:end]
+                except json.JSONDecodeError:
+                    # Fallback: try extracting with regex (non-greedy)
+                    import re
                     json_match = re.search(r'\{.*?\}', content, re.DOTALL)
                     if json_match:
                         content = json_match.group()
-                
-                # Parse JSON
-                decision = json.loads(content.strip())
+                        decision = json.loads(content)
+                    else:
+                        raise ValueError("No JSON object found")
                 
                 self.log('info', f"Ollama succeeded with model: {model}")
                 decision['latency_ms'] = 0

@@ -60,13 +60,17 @@ class SentimentAgent(BaseAgent):
                 result = resp.json()
                 response = result.get('response', '').strip()
                 if response:
-                    # Clean response - extract just the number
+                    # Extract numeric value from response
                     import re
                     match = re.search(r'[-+]?\d*\.?\d+', response)
                     if match:
-                        response = match.group()
-                    self.log('info', f"Ollama succeeded with model: {model}, response: {response[:50]}")
-                    return response
+                        score = match.group()
+                        self.log('info', f"Ollama succeeded with model: {model}, extracted: {score}")
+                        return score
+                    else:
+                        self.log('warning', f"No numeric value found in Ollama response: {response[:100]}")
+                else:
+                    self.log('warning', f"Empty response from Ollama model {model}")
             except Exception as e:
                 self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")
                 continue
