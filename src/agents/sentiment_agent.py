@@ -59,15 +59,18 @@ class SentimentAgent(BaseAgent):
                     continue
                 result = resp.json()
                 response = result.get('response', '').strip()
-                # Clean response - remove any extra data after valid JSON
                 if response:
-                    # Try to extract just the numeric/sentiment value
+                    # Extract numeric value from response
                     import re
                     match = re.search(r'[-+]?\d*\.?\d+', response)
                     if match:
-                        response = match.group()
-                    self.log('info', f"Ollama succeeded with model: {model}, response: {response[:50]}")
-                    return response
+                        score = match.group()
+                        self.log('info', f"Ollama succeeded with model: {model}, extracted: {score}")
+                        return score
+                    else:
+                        self.log('warning', f"No numeric value found in Ollama response: {response[:100]}")
+                else:
+                    self.log('warning', f"Empty response from Ollama model {model}")
             except Exception as e:
                 self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")
                 continue
@@ -109,11 +112,18 @@ class SentimentAgent(BaseAgent):
                 self.log('error', f"LLM API error: {result['error']}")
                 return "0.0"
             
+            # Validate response structure
             if 'choices' not in result or not result['choices']:
                 self.log('error', f"LLM API returned no choices: {result}")
                 return "0.0"
+            
+            message = result['choices'][0].get('message', {})
+            content = message.get('content', '').strip()
+            if not content:
+                self.log('error', f"LLM API returned empty content: {result}")
+                return "0.0"
                 
-            return result['choices'][0]['message']['content'].strip()
+            return content
         except Exception as e:
             self.log('error', f"LLM call failed: {e}")
             return "0.0"

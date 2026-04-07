@@ -350,22 +350,25 @@ class TradingDecisionAgent(BaseAgent):
                 result = resp.json()
                 content = result.get('response', '{}').strip()
                 
-                # Parse JSON - handle various formats
-                try:
-                    # Try direct JSON first
-                    decision = json.loads(content.strip())
-                except json.JSONDecodeError:
-                    # Try to extract JSON from markdown or text
-                    import re
-                    json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
+                # Extract JSON from response (handle markdown and extra text)
+                import re
+                
+                # Remove markdown code blocks
+                if content.startswith('```'):
+                    parts = content.split('```')
+                    if len(parts) >= 2:
+                        content = parts[1].strip()
+                        if content.lower().startswith('json'):
+                            content = content[4:].strip()
+                
+                # Find JSON object in text
+                if not content.startswith('{'):
+                    json_match = re.search(r'\{.*?\}', content, re.DOTALL)
                     if json_match:
-                        try:
-                            decision = json.loads(json_match.group())
-                        except:
-                            pass
-                    else:
-                        # Last resort - return HOLD with 0 confidence
-                        raise ValueError("Could not parse JSON response")
+                        content = json_match.group()
+                
+                # Parse JSON
+                decision = json.loads(content.strip())
                 
                 self.log('info', f"Ollama succeeded with model: {model}")
                 decision['latency_ms'] = 0
