@@ -52,15 +52,21 @@ class SentimentAgent(BaseAgent):
                 resp = requests.post(
                     f"{self.OLLAMA_BASE}/api/generate",
                     json=data,
-                    timeout=60
+                    timeout=120
                 )
                 if resp.status_code != 200:
                     self.log('warning', f"Ollama model {model} returned status {resp.status_code}, trying fallback...")
                     continue
                 result = resp.json()
                 response = result.get('response', '').strip()
+                # Clean response - remove any extra data after valid JSON
                 if response:
-                    self.log('info', f"Ollama succeeded with model: {model}")
+                    # Try to extract just the numeric/sentiment value
+                    import re
+                    match = re.search(r'[-+]?\d*\.?\d+', response)
+                    if match:
+                        response = match.group()
+                    self.log('info', f"Ollama succeeded with model: {model}, response: {response[:50]}")
                     return response
             except Exception as e:
                 self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")

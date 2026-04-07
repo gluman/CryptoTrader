@@ -85,8 +85,8 @@ openrouter:
 # ============================================
 ollama:
   base_url: "http://192.168.0.94:11434"
-  model: "gemma4:latest"
-  fallback_model: "qwen3.5:9b"
+  model: "qwen3.5:9b"
+  fallback_model: "gemma4:latest"
   temperature: 0.3
   max_tokens: 1024
 

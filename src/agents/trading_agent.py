@@ -350,13 +350,23 @@ class TradingDecisionAgent(BaseAgent):
                 result = resp.json()
                 content = result.get('response', '{}').strip()
                 
-                # Parse JSON
-                if content.startswith('```'):
-                    content = content.split('```')[1]
-                    if content.startswith('json'):
-                        content = content[4:]
+                # Parse JSON - handle various formats
+                try:
+                    # Try direct JSON first
+                    decision = json.loads(content.strip())
+                except json.JSONDecodeError:
+                    # Try to extract JSON from markdown or text
+                    import re
+                    json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
+                    if json_match:
+                        try:
+                            decision = json.loads(json_match.group())
+                        except:
+                            pass
+                    else:
+                        # Last resort - return HOLD with 0 confidence
+                        raise ValueError("Could not parse JSON response")
                 
-                decision = json.loads(content.strip())
                 self.log('info', f"Ollama succeeded with model: {model}")
                 decision['latency_ms'] = 0
                 decision['tokens'] = 0
@@ -366,6 +376,13 @@ class TradingDecisionAgent(BaseAgent):
             except Exception as e:
                 self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")
                 continue
+        
+        self.log('error', "All Ollama models failed")
+        return {
+            'signal': 'HOLD',
+            'confidence': 0.0,
+            'reasoning': "All Ollama models failed"
+        }
         
         self.log('error', "All Ollama models failed")
         return {
