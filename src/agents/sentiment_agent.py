@@ -14,7 +14,8 @@ class SentimentAgent(BaseAgent):
     
     # Ollama fallback server
     OLLAMA_BASE = "http://192.168.0.94:11434"
-    OLLAMA_MODEL = "qwen3.5:9b"
+    OLLAMA_MODEL = "gemma4:latest"
+    OLLAMA_FALLBACK = "qwen3.5:9b"
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager):
         super().__init__('Sentiment', logger)
@@ -37,27 +38,36 @@ class SentimentAgent(BaseAgent):
         self.ragflow_enabled = bool(ragflow_cfg.get('api_key'))
     
     def call_llm_ollama(self, prompt: str) -> str:
-        """Call Ollama API as fallback"""
-        try:
-            data = {
-                'model': self.OLLAMA_MODEL,
-                'prompt': prompt,
-                'temperature': self.temperature,
-                'max_tokens': 100,
-            }
-            resp = requests.post(
-                f"{self.OLLAMA_BASE}/api/generate",
-                json=data,
-                timeout=60
-            )
-            if resp.status_code != 200:
-                self.log('error', f"Ollama returned status {resp.status_code}: {resp.text[:200]}")
-                return "0.0"
-            result = resp.json()
-            return result.get('response', '0.0').strip()
-        except Exception as e:
-            self.log('error', f"Ollama call failed: {e}")
-            return "0.0"
+        """Call Ollama API with fallback to alternate model"""
+        models = [self.OLLAMA_MODEL, self.OLLAMA_FALLBACK]
+        
+        for model in models:
+            try:
+                data = {
+                    'model': model,
+                    'prompt': prompt,
+                    'temperature': self.temperature,
+                    'max_tokens': 100,
+                }
+                resp = requests.post(
+                    f"{self.OLLAMA_BASE}/api/generate",
+                    json=data,
+                    timeout=60
+                )
+                if resp.status_code != 200:
+                    self.log('warning', f"Ollama model {model} returned status {resp.status_code}, trying fallback...")
+                    continue
+                result = resp.json()
+                response = result.get('response', '').strip()
+                if response:
+                    self.log('info', f"Ollama succeeded with model: {model}")
+                    return response
+            except Exception as e:
+                self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")
+                continue
+        
+        self.log('error', "All Ollama models failed")
+        return "0.0"
     
     def call_llm(self, prompt: str) -> str:
         """Call OpenRouter API"""

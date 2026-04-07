@@ -17,7 +17,8 @@ class TradingDecisionAgent(BaseAgent):
     
     # Ollama fallback server
     OLLAMA_BASE = "http://192.168.0.94:11434"
-    OLLAMA_MODEL = "qwen3.5:9b"
+    OLLAMA_MODEL = "gemma4:latest"
+    OLLAMA_FALLBACK = "qwen3.5:9b"
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager, 
                  sentiment_agent: SentimentAgent):
@@ -328,43 +329,50 @@ class TradingDecisionAgent(BaseAgent):
         return decision
     
     def _call_ollama(self, prompt: str) -> Dict[str, Any]:
-        """Call Ollama API as fallback"""
-        try:
-            data = {
-                'model': self.OLLAMA_MODEL,
-                'prompt': prompt,
-                'temperature': self.config.openrouter.get('temperature', 0.3),
-                'max_tokens': 512,
-                'format': 'json',
-            }
-            resp = requests.post(
-                f"{self.OLLAMA_BASE}/api/generate",
-                json=data,
-                timeout=120
-            )
-            
-            result = resp.json()
-            content = result.get('response', '{}').strip()
-            
-            # Parse JSON
-            if content.startswith('```'):
-                content = content.split('```')[1]
-                if content.startswith('json'):
-                    content = content[4:]
-            
-            decision = json.loads(content.strip())
-            decision['latency_ms'] = 0
-            decision['tokens'] = 0
-            decision['source'] = 'ollama'
-            
-            return decision
-        except Exception as e:
-            self.log('error', f"Ollama call failed: {e}")
-            return {
-                'signal': 'HOLD',
-                'confidence': 0.0,
-                'reasoning': f"LLM error: {str(e)}"
-            }
+        """Call Ollama API with fallback to alternate model"""
+        models = [self.OLLAMA_MODEL, self.OLLAMA_FALLBACK]
+        
+        for model in models:
+            try:
+                data = {
+                    'model': model,
+                    'prompt': prompt,
+                    'temperature': self.config.openrouter.get('temperature', 0.3),
+                    'max_tokens': 512,
+                    'format': 'json',
+                }
+                resp = requests.post(
+                    f"{self.OLLAMA_BASE}/api/generate",
+                    json=data,
+                    timeout=120
+                )
+                
+                result = resp.json()
+                content = result.get('response', '{}').strip()
+                
+                # Parse JSON
+                if content.startswith('```'):
+                    content = content.split('```')[1]
+                    if content.startswith('json'):
+                        content = content[4:]
+                
+                decision = json.loads(content.strip())
+                self.log('info', f"Ollama succeeded with model: {model}")
+                decision['latency_ms'] = 0
+                decision['tokens'] = 0
+                decision['source'] = 'ollama'
+                
+                return decision
+            except Exception as e:
+                self.log('warning', f"Ollama model {model} failed: {e}, trying fallback...")
+                continue
+        
+        self.log('error', "All Ollama models failed")
+        return {
+            'signal': 'HOLD',
+            'confidence': 0.0,
+            'reasoning': "All Ollama models failed"
+        }
     
     def save_decision(self, symbol: str, exchange: str, timeframe: str,
                       indicators: Dict, sentiment: Dict, decision: Dict,

@@ -72,6 +72,10 @@ class Config:
         self._data.setdefault('openrouter', {})
         self._data['openrouter']['api_key'] = os.getenv('OPENROUTER_API_KEY', '')
         
+        # Ollama
+        self._data.setdefault('ollama', {})
+        self._data['ollama']['base_url'] = os.getenv('OLLAMA_BASE_URL', 'http://192.168.0.94:11434')
+        
         # PostgreSQL
         self._data.setdefault('postgresql', {})
         self._data['postgresql']['host'] = os.getenv('POSTGRES_HOST', '192.168.0.194')

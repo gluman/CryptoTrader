@@ -75,7 +75,18 @@ cryptorank:
 # ============================================
 openrouter:
   base_url: "https://openrouter.ai/api/v1"
-  model: "meta-llama/llama-3.3-70b-instruct:free"
+  model: "qwen/qwen3.6-plus:free"
+  fallback_model: "stepfun/step-3.5-flash:free"
+  temperature: 0.3
+  max_tokens: 1024
+
+# ============================================
+# Ollama LLM (local fallback)
+# ============================================
+ollama:
+  base_url: "http://192.168.0.94:11434"
+  model: "gemma4:latest"
+  fallback_model: "qwen3.5:9b"
   temperature: 0.3
   max_tokens: 1024
 
