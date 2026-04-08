@@ -340,6 +340,7 @@ class TradingDecisionAgent(BaseAgent):
                     'temperature': self.config.openrouter.get('temperature', 0.3),
                     'max_tokens': 512,
                     'format': 'json',
+                    'stream': False,
                 }
                 resp = requests.post(
                     f"{self.OLLAMA_BASE}/api/generate",
