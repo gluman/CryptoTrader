@@ -48,6 +48,7 @@ class SentimentAgent(BaseAgent):
                     'prompt': prompt,
                     'temperature': self.temperature,
                     'max_tokens': 100,
+                    'stream': False,
                 }
                 resp = requests.post(
                     f"{self.OLLAMA_BASE}/api/generate",
