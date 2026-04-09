@@ -279,18 +279,72 @@ class TradingDecisionAgent(BaseAgent):
         return prompt
     
     def call_llm(self, prompt: str) -> Dict[str, Any]:
-        """Call OpenRouter for decision with Ollama fallback"""
+        """Simple rule-based decision without LLM for reliability"""
         
-        # Try OpenRouter first
-        try:
-            result = self._call_openrouter(prompt)
-            if result:
-                return result
-        except Exception as e:
-            self.log('warning', f"OpenRouter failed: {e}, trying Ollama...")
+        indicators = self._parse_indicators_from_prompt(prompt)
         
-        # Fallback to Ollama
-        return self._call_ollama(prompt)
+        signal = 'HOLD'
+        confidence = 0.0
+        reasoning = ''
+        
+        css = indicators.get('css_value', 0)
+        rsi = indicators.get('rsi_14', 50)
+        price = indicators.get('price', 0)
+        sma20 = indicators.get('sma_20', 0)
+        sma50 = indicators.get('sma_50', 0)
+        macd_hist = indicators.get('macd_hist', 0)
+        
+        if indicators.get('css_cross_up') and rsi < 70 and price > sma50:
+            signal = 'BUY'
+            confidence = 0.75
+            reasoning = f"CSS cross up ({css:.4f}), RSI {rsi:.1f}, price above SMA50"
+        elif indicators.get('css_cross_down') and rsi > 30:
+            signal = 'SELL'
+            confidence = 0.75
+            reasoning = f"CSS cross down ({css:.4f}), RSI {rsi:.1f}"
+        elif css > 0.15 and rsi < 60 and price > sma20:
+            signal = 'BUY'
+            confidence = 0.65
+            reasoning = f"Strong CSS ({css:.4f}), favorable RSI"
+        elif css < -0.15 and rsi > 40:
+            signal = 'SELL'
+            confidence = 0.65
+            reasoning = f"Weak CSS ({css:.4f}), bearish"
+        
+        self.log('info', f"Rule-based decision: {signal} (conf={confidence:.0%})")
+        
+        return {
+            'signal': signal,
+            'confidence': confidence,
+            'reasoning': reasoning
+        }
+    
+    def _parse_indicators_from_prompt(self, prompt: str) -> Dict:
+        """Extract indicators from prompt for rule-based decisions"""
+        import re
+        indicators = {}
+        
+        patterns = {
+            'price': r'Price: \$?([0-9.]+)',
+            'sma_20': r'SMA 20: \$?([0-9.]+)',
+            'sma_50': r'SMA 50: \$?([0-9.]+)',
+            'rsi_14': r'RSI 14: ([0-9.]+)',
+            'macd_hist': r'hist: ([0-9.-]+)',
+            'css_value': r'CSS: ([0-9.-]+)',
+            'css_cross_up': r'cross up: (True|true|1|Yes)',
+            'css_cross_down': r'cross down: (True|true|1|Yes)',
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, prompt, re.IGNORECASE)
+            if match:
+                val = match.group(1)
+                if key in ['css_cross_up', 'css_cross_down']:
+                    indicators[key] = val.lower() in ['true', '1', 'yes']
+                else:
+                    indicators[key] = float(val)
+        
+        return indicators
     
     def _call_openrouter(self, prompt: str) -> Dict[str, Any]:
         """Call OpenRouter API"""

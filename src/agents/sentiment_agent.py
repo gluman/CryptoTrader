@@ -130,30 +130,23 @@ class SentimentAgent(BaseAgent):
             return "0.0"
     
     def analyze_sentiment(self, title: str, summary: str = '') -> float:
-        """Analyze sentiment of a single news item (-1 to +1)"""
-        prompt = f"""Rate the crypto market sentiment of this news on a scale from -1.0 (very bearish) to +1.0 (very bullish). Return ONLY a number.
-
-Title: {title}
-Summary: {summary[:200]}
-
-Sentiment score:"""
+        """Simple keyword-based sentiment analysis"""
+        text = (title + ' ' + summary).lower()
         
-        # Try OpenRouter first
-        try:
-            result = self.call_llm(prompt)
-            if result != "0.0":
-                score = float(result.replace('"', '').strip())
-                return max(-1.0, min(1.0, score))
-        except (ValueError, TypeError):
-            pass
+        bullish_words = ['bull', 'rise', 'gain', 'surge', 'up', 'grow', 'growth', 'positive', 
+                        'higher', 'buy', 'breakout', ' ATH', 'high', 'green', 'pump']
+        bearish_words = ['bear', 'fall', 'drop', 'down', 'crash', 'loss', 'decline', 'negative',
+                        'sell', 'lower', 'low', 'red', 'dump', 'breakdown', 'danger', 'risk']
         
-        # Fallback to Ollama
-        try:
-            result = self.call_llm_ollama(prompt)
-            score = float(result.replace('"', '').strip())
-            return max(-1.0, min(1.0, score))
-        except (ValueError, TypeError):
-            return 0.0
+        score = 0.0
+        for word in bullish_words:
+            if word in text:
+                score += 0.2
+        for word in bearish_words:
+            if word in text:
+                score -= 0.2
+        
+        return max(-1.0, min(1.0, score))
     
     def get_unanalyzed_news(self, hours: int = 24) -> List[Dict]:
         """Get news items without sentiment score"""
