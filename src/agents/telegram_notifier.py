@@ -77,6 +77,26 @@ class TelegramNotifier:
 <b>Win Rate:</b> {summary.get('win_rate', 'N/A')}"""
         self.send_message(text)
     
+    def notify_hourly_summary(self, summary: Dict[str, Any]):
+        """Send hourly summary of operations"""
+        buys = summary.get('buys', 0)
+        sells = summary.get('sells', 0)
+        errors = summary.get('errors', 0)
+        
+        emoji = "✅" if errors == 0 else "⚠️"
+        text = f"""{emoji} <b>Hourly Report</b>
+<b>Time:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC
+<b>Collect:</b> {summary.get('ohlcv_records', 0)} OHLCV | {summary.get('news_records', 0)} News
+<b>Sentiment:</b> avg={summary.get('avg_sentiment', 'N/A')}
+<b>Decisions:</b> {buys} BUY | {sells} SELL | {summary.get('holds', 0)} HOLD
+<b>Trades:</b> {summary.get('trades_executed', 0)}
+<b>Errors:</b> {errors}"""
+        
+        if errors > 0:
+            text += f"\n<b>Errors:</b> {summary.get('error_details', 'Check logs')}"
+        
+        self.send_message(text)
+    
     def verify_connection(self) -> bool:
         """Verify bot is working"""
         try:

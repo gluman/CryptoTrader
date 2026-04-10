@@ -57,6 +57,8 @@ telegram:
     - error
     - trade_executed
     - signal_strong
+  hourly_summary: true
+  hourly_interval_minutes: 60
 
 # ============================================
 # CoinDesk API

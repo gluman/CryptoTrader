@@ -27,12 +27,13 @@ class CryptoTraderScheduler:
         self.db = None
         self.agents = {}
         
-        # Schedule intervals (seconds)
+# Schedule intervals (seconds)
         self.intervals = {
             'collect': 600,      # 10 minutes
-            'sentiment': 1800,   # 30 minutes
-            'decide': 900,      # 15 minutes
-            'execute': 300,      # 5 minutes (check SL/TP)
+            'sentiment': 1800,    # 30 minutes
+            'decide': 900,       # 15 minutes
+            'execute': 300,     # 5 minutes
+            'hourly_report': 3600,  # 1 hour
         }
         
         self.last_run = {
@@ -40,6 +41,7 @@ class CryptoTraderScheduler:
             'sentiment': 0,
             'decide': 0,
             'execute': 0,
+            'hourly_report': 0,
         }
     
     def setup(self, config_path=None):
@@ -81,7 +83,9 @@ class CryptoTraderScheduler:
     
     def should_run(self, task: str) -> bool:
         """Check if task should run based on interval"""
-        elapsed = time.time() - self.last_run[task]
+        if task not in self.intervals:
+            return False
+        elapsed = time.time() - self.last_run.get(task, 0)
         return elapsed >= self.intervals[task]
     
     def run_task(self, task: str):
@@ -102,6 +106,94 @@ class CryptoTraderScheduler:
                         'total_signals': len(result.get('decisions', [])),
                         **summary,
                     })
+            
+            # Send hourly report
+            if self.telegram and task == 'decide':
+                self._send_hourly_report()
+    
+    def _send_hourly_report(self):
+        """Send hourly summary to Telegram"""
+        if not self.telegram:
+            return
+        
+        # Gather stats from last hour
+        total_errors = 0
+        total_buys = 0
+        total_sells = 0
+        total_holds = 0
+        ohlcv_count = 0
+        news_count = 0
+        avg_sentiment = 'N/A'
+        
+        # Get stats from agents
+        if 'collect' in self.agents:
+            try:
+                collector = self.agents['collect']
+                with self.db.get_session() as session:
+                    from sqlalchemy import func
+                    from src.core.database import OHLCVRaw, NewsRaw
+                    from datetime import timedelta
+                    
+                    since = datetime.utcnow() - timedelta(hours=1)
+                    ohlcv_count = session.query(func.count(OHLCVRaw.id)).filter(
+                        OHLCVRaw.created_at >= since
+                    ).scalar() or 0
+                    news_count = session.query(func.count(NewsRaw.id)).filter(
+                        NewsRaw.created_at >= since
+                    ).scalar() or 0
+            except Exception as e:
+                self.logger.error(f"Failed to get stats: {e}")
+        
+        if 'decide' in self.agents:
+            try:
+                with self.db.get_session() as session:
+                    from src.core.database import Signal
+                    from datetime import timedelta
+                    
+                    since = datetime.utcnow() - timedelta(hours=1)
+                    signals = session.query(Signal).filter(
+                        Signal.created_at >= since
+                    ).all()
+                    
+                    for s in signals:
+                        if s.signal_type == 'BUY':
+                            total_buys += 1
+                        elif s.signal_type == 'SELL':
+                            total_sells += 1
+                        elif s.signal_type == 'HOLD':
+                            total_holds += 1
+            except Exception as e:
+                self.logger.error(f"Failed to get signals: {e}")
+        
+        if 'sentiment' in self.agents:
+            try:
+                with self.db.get_session() as session:
+                    from src.core.database import NewsRaw
+                    from sqlalchemy import func
+                    from datetime import timedelta
+                    
+                    since = datetime.utcnow() - timedelta(hours=1)
+                    avg = session.query(func.avg(NewsRaw.sentiment_score)).filter(
+                        NewsRaw.created_at >= since,
+                        NewsRaw.sentiment_score.isnot(None)
+                    ).scalar()
+                    if avg:
+                        avg_sentiment = round(avg, 2)
+            except Exception as e:
+                self.logger.error(f"Failed to get sentiment: {e}")
+        
+        summary = {
+            'ohlcv_records': ohlcv_count,
+            'news_records': news_count,
+            'avg_sentiment': avg_sentiment,
+            'buys': total_buys,
+            'sells': total_sells,
+            'holds': total_holds,
+            'trades_executed': total_buys + total_sells,
+            'errors': total_errors,
+        }
+        
+        self.telegram.notify_hourly_summary(summary)
         
         except Exception as e:
             self.logger.error(f"Task {task} failed: {e}")
