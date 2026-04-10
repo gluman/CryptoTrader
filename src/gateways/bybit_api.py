@@ -105,6 +105,13 @@ class BybitAPI:
             params['symbol'] = symbol
         return self._make_request('GET', '/v5/market/tickers', params=params, auth=False)
     
+    def get_ticker(self, symbol: str) -> Dict:
+        """Get ticker for a single symbol"""
+        data = self.get_tickers('spot', symbol)
+        if data.get('result', {}).get('list'):
+            return data['result']['list'][0]
+        return {}
+    
     def get_kline(self, symbol: str, interval: str = '60', category: str = 'linear',
                   limit: int = 200) -> Dict:
         """Get kline data"""

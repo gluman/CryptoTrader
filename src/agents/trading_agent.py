@@ -17,7 +17,7 @@ class TradingDecisionAgent(BaseAgent):
     
     # Ollama fallback server
     OLLAMA_BASE = "http://192.168.0.94:11434"
-    OLLAMA_MODEL = "gemma4:latest"
+    OLLAMA_MODEL = "minimax-m2.7:cloud"
     OLLAMA_FALLBACK = "qwen3.5:9b"
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager, 

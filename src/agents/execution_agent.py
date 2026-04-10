@@ -259,12 +259,85 @@ class ExecutionAgent(BaseAgent):
             return {'exchange': exchange, 'balances': [], 'error': str(e)}
     
     def get_usdt_balance(self, exchange: str = 'binance') -> float:
-        """Get USDT balance for trading"""
+        """Get USDT balance for trading - uses total balance"""
         balance = self.get_balance(exchange)
         for b in balance.get('balances', []):
             if b['asset'] == 'USDT':
-                return b['free']
+                # Use total for Bybit (free can be 0 due to how API reports it)
+                return b.get('total', b.get('free', 0.0))
         return 0.0
+    
+    def get_total_portfolio_value(self, exchange: str = 'binance') -> float:
+        """Get total portfolio value in USDT (including other assets)
+        
+        This calculates the total value of all assets converted to USDT
+        """
+        balance = self.get_balance(exchange)
+        total_usdt = 0.0
+        
+        # Get current prices for conversion
+        ex = self.exchanges.get(exchange)
+        prices = {}
+        
+        if exchange == 'bybit':
+            try:
+                tickers = ex.get_tickers('spot')
+                for t in tickers.get('result', {}).get('list', []):
+                    prices[t['symbol']] = float(t.get('lastPrice', 0))
+            except Exception as e:
+                self.log('warning', f"Failed to get prices: {e}")
+        
+        # Calculate total value
+        for b in balance.get('balances', []):
+            asset = b['asset']
+            qty = b.get('total', 0.0)
+            
+            if asset == 'USDT':
+                total_usdt += qty
+            elif asset + 'USDT' in prices:
+                # Convert to USDT
+                total_usdt += qty * prices[asset + 'USDT']
+                self.log('debug', f"  {asset}: {qty} @ ${prices[asset + 'USDT']} = ${qty * prices[asset + 'USDT']:.2f}")
+        
+        return total_usdt
+    
+    def calculate_position_size(self, exchange: str = 'binance', risk_percent: float = 5.0) -> float:
+        """Calculate position size based on risk percentage of TOTAL portfolio
+        
+        Uses total portfolio value including all assets converted to USDT
+        
+        Args:
+            exchange: Exchange to use
+            risk_percent: Risk percentage (default 5%)
+            
+        Returns:
+            Amount in USDT to trade
+        """
+        # Use total portfolio value for better risk management
+        portfolio_value = self.get_total_portfolio_value(exchange)
+        
+        if portfolio_value <= 0:
+            self.log('warning', f"No portfolio value on {exchange}")
+            return 0.0
+        
+# Calculate position size as percentage of total portfolio
+        position_size = portfolio_value * (risk_percent / 100)
+        
+        # For small portfolios (< $20), use smaller minimum to enable testing
+        min_amount = 1.0 if portfolio_value < 20 else 5.0
+        if exchange == 'binance':
+            min_amount = 2.0 if portfolio_value < 20 else 10.0
+            
+        if position_size < min_amount:
+            # If below minimum but we have some portfolio value, use minimum
+            if portfolio_value >= min_amount:
+                position_size = min_amount
+            else:
+                self.log('warning', f"Position ${position_size:.2f} < min ${min_amount}, portfolio ${portfolio_value:.2f}")
+                return 0.0
+            
+        self.log('info', f"Position: {risk_percent}% of portfolio ${portfolio_value:.2f} = ${position_size:.2f}")
+        return round(position_size, 2)
     
     # ==================== Order Execution ====================
     
@@ -507,49 +580,66 @@ class ExecutionAgent(BaseAgent):
         errors = 0
         details = []
         
+        # Query and convert to dicts within session to avoid detached instance error
         with self.db.get_session() as session:
             pending_buys = session.query(Signal).filter_by(
                 signal_type='BUY', status='PENDING'
             ).order_by(Signal.created_at.desc()).limit(5).all()
+            
+            # Convert to list of dicts while still in session
+            pending_data = [
+                {
+                    'id': s.id,
+                    'symbol': s.symbol,
+                    'exchange': s.exchange,
+                }
+                for s in pending_buys
+            ]
         
-        for signal in pending_buys:
+        for data in pending_data:
+            signal_id = data['id']
+            symbol = data['symbol']
+            exchange = data['exchange'] or 'binance'
             try:
-                symbol = signal.symbol
-                exchange = signal.exchange or 'binance'
-                
                 # Check if we already have a position
                 existing = self.get_open_position(symbol, exchange)
                 if existing:
                     self.log('info', f"Skipping BUY for {symbol} — already have open position")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+                    self.update_signal_status(signal_id, 'SKIPPED')
                     continue
                 
-                # Calculate position size
-                usdt_balance = self.get_usdt_balance(exchange)
-                amount = usdt_balance * self.max_position_pct / 100
+                # Calculate position size using risk management
+                amount = self.calculate_position_size(exchange, self.max_position_pct)
                 
-                if amount < 10:  # Minimum $10
-                    self.log('warning', f"Insufficient balance for {symbol}: ${amount:.2f}")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+                if amount <= 0:
+                    self.log('warning', f"Insufficient balance for {symbol}: calculated amount = ${amount:.2f}")
+                    self.update_signal_status(signal_id, 'SKIPPED')
                     continue
                 
                 # Execute buy
-                amount_str = str(round(amount, 2))
+                amount_str = str(amount)
                 result = self.execute_spot_buy(symbol, amount_str, exchange)
                 
                 if 'error' in result:
                     errors += 1
                     self.log('error', f"BUY failed for {symbol}: {result['error']}")
-                    self.update_signal_status(signal.id, 'FAILED')
+                    self.update_signal_status(signal_id, 'FAILED')
                     continue
                 
                 # Save trade
-                trade_id = self.save_trade_to_db(signal.id, result)
+                trade_id = self.save_trade_to_db(signal_id, result)
                 
-                # Get entry price
-                executed_qty = float(result.get('executed_qty', 0))
-                cost = float(result.get('cummulative_quote_qty', amount))
-                entry_price = cost / executed_qty if executed_qty > 0 else 0
+                # Get entry price from ticker (more reliable than from order result)
+                ex = self.exchanges.get(exchange)
+                if ex:
+                    ticker = ex.get_ticker(symbol)
+                    current_price = float(ticker.get('lastPrice', 0))
+                else:
+                    current_price = 0
+                
+                executed_qty = float(result.get('executed_qty', amount) or amount)
+                cost = amount
+                entry_price = current_price if current_price > 0 else cost / executed_qty if executed_qty > 0 else 0
                 
                 # Create position with SL/TP
                 self.create_position(
@@ -558,7 +648,7 @@ class ExecutionAgent(BaseAgent):
                     entry_price=entry_price,
                     quantity=executed_qty,
                     cost_usdt=cost,
-                    signal_id=signal.id,
+                    signal_id=signal_id,
                     trade_id=trade_id,
                 )
                 
@@ -573,7 +663,7 @@ class ExecutionAgent(BaseAgent):
             
             except Exception as e:
                 errors += 1
-                self.log('error', f"Execution failed for signal {signal.id}: {e}")
+                self.log('error', f"Execution failed for signal {signal_id}: {e}")
         
         return {'executed': executed, 'errors': errors, 'details': details}
     
@@ -583,21 +673,31 @@ class ExecutionAgent(BaseAgent):
         errors = 0
         details = []
         
+        # Query and convert to dicts within session to avoid detached instance error
         with self.db.get_session() as session:
             pending_sells = session.query(Signal).filter_by(
                 signal_type='SELL', status='PENDING'
             ).order_by(Signal.created_at.desc()).limit(5).all()
+            
+            pending_data = [
+                {
+                    'id': s.id,
+                    'symbol': s.symbol,
+                    'exchange': s.exchange,
+                }
+                for s in pending_sells
+            ]
         
-        for signal in pending_sells:
+        for data in pending_data:
+            signal_id = data['id']
+            symbol = data['symbol']
+            exchange = data['exchange'] or 'binance'
             try:
-                symbol = signal.symbol
-                exchange = signal.exchange or 'binance'
-                
                 # Find open position
                 position = self.get_open_position(symbol, exchange)
                 if not position:
                     self.log('info', f"Skipping SELL for {symbol} — no open position")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+                    self.update_signal_status(signal_id, 'SKIPPED')
                     continue
                 
                 # Get current price
@@ -612,7 +712,7 @@ class ExecutionAgent(BaseAgent):
                 if 'error' in result:
                     errors += 1
                     self.log('error', f"SELL failed for {symbol}: {result['error']}")
-                    self.update_signal_status(signal.id, 'FAILED')
+                    self.update_signal_status(signal_id, 'FAILED')
                     continue
                 
                 # Close position
@@ -621,12 +721,12 @@ class ExecutionAgent(BaseAgent):
                 )
                 
                 # Save trade
-                self.save_trade_to_db(signal.id, {
+                self.save_trade_to_db(signal_id, {
                     **result,
                     'price': current_price,
                 })
                 
-                self.update_signal_status(signal.id, 'EXECUTED', 
+                self.update_signal_status(signal_id, 'EXECUTED', 
                                           close_result.get('pnl_percent'))
                 
                 executed += 1
@@ -641,7 +741,7 @@ class ExecutionAgent(BaseAgent):
             
             except Exception as e:
                 errors += 1
-                self.log('error', f"SELL execution failed for signal {signal.id}: {e}")
+                self.log('error', f"SELL execution failed for signal {signal_id}: {e}")
         
         return {'executed': executed, 'errors': errors, 'details': details}
     
