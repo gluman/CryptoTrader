@@ -106,7 +106,6 @@ postgresql:
 # ============================================
 ragflow:
   base_url: "http://192.168.0.186:9380"
-  # Single dataset for all crypto trading data
   dataset_id: "dcaa90d231d711f199937e8f52fe67f3"
 
 # ============================================
