@@ -75,7 +75,7 @@ cryptorank:
 # ============================================
 openrouter:
   base_url: "https://openrouter.ai/api/v1"
-  model: "qwen/qwen3.6-plus:free"
+  model: "minimax/minimax-m2.5:free"
   fallback_model: "stepfun/step-3.5-flash:free"
   temperature: 0.3
   max_tokens: 1024
@@ -85,8 +85,8 @@ openrouter:
 # ============================================
 ollama:
   base_url: "http://192.168.0.94:11434"
-  model: "qwen3.5:9b"
-  fallback_model: "gemma4:latest"
+  model: "minimax-m2.7:cloud"
+  fallback_model: "qwen3.5:9b"
   temperature: 0.3
   max_tokens: 1024
 
