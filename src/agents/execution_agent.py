@@ -240,9 +240,10 @@ class ExecutionAgent(BaseAgent):
                 data = ex.get_wallet_balance('UNIFIED')
                 balances = data['result']['list'][0]['coin']
                 return {'exchange': exchange, 'balances': [
-                    {'asset': b['coin'], 'free': float(b['availableToWithdraw']), 
+                    {'asset': b['coin'], 
+                     'free': float(b['availableToWithdraw']) if b.get('availableToWithdraw') else 0.0,
                      'total': float(b['walletBalance'])}
-                    for b in balances if float(b['walletBalance']) > 0
+                    for b in balances if float(b.get('walletBalance', 0)) > 0
                 ]}
             
             elif exchange == 'bitfinex':

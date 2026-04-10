@@ -30,8 +30,8 @@ class BybitAPI:
         self.base_url = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'CryptoTrader/1.0',
-            'X-Referer': 'cryptotrader',
+            'User-Agent': 'bybit-skill/1.2.3',
+            'X-Referer': 'bybit-skill',
         })
         self.logger = logger or logging.getLogger(__name__)
     
@@ -84,7 +84,8 @@ class BybitAPI:
             if method.upper() == 'GET':
                 resp = self.session.get(url, params=params, headers=headers, timeout=30)
             else:
-                resp = self.session.post(url, json=json_data, headers=headers, timeout=30)
+                body = json.dumps(json_data, separators=(',', ':')) if json_data else None
+                resp = self.session.post(url, data=body, headers=headers, timeout=30)
             
             data = resp.json()
             
