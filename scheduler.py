@@ -15,6 +15,7 @@ from src.agents import (
     DataCollectorAgent, SentimentAgent, TradingDecisionAgent,
     ExecutionAgent, TelegramNotifier
 )
+from src.agents.email_notifier import EmailNotifier
 
 
 class CryptoTraderScheduler:
@@ -77,6 +78,19 @@ class CryptoTraderScheduler:
                 self.config.telegram['bot_token'],
                 self.config.telegram['chat_id'],
                 self.logger
+            )
+        
+        # Email
+        self.email = None
+        email_cfg = self.config.email
+        if email_cfg.get('enabled') and email_cfg.get('sender'):
+            self.email = EmailNotifier(
+                smtp_host=email_cfg.get('smtp_host', 'smtp.gmail.com'),
+                smtp_port=email_cfg.get('smtp_port', 587),
+                sender=email_cfg.get('sender', ''),
+                password=email_cfg.get('password', ''),
+                recipients=email_cfg.get('recipients', []),
+                logger=self.logger
             )
         
         self.logger.info("CryptoTrader Scheduler initialized")
@@ -194,11 +208,15 @@ class CryptoTraderScheduler:
         }
         
         self.telegram.notify_hourly_summary(summary)
+            if self.email:
+                self.email.notify_hourly_summary(summary)
         
         except Exception as e:
             self.logger.error(f"Task {task} failed: {e}")
             if self.telegram:
                 self.telegram.notify_error(f"Scheduler.{task}", str(e))
+            if self.email:
+                self.email.notify_error(f"Scheduler.{task}", str(e))
     
     def run(self):
         """Main scheduler loop"""

@@ -60,6 +60,19 @@ telegram:
   hourly_summary: true
   hourly_interval_minutes: 60
 
+# Email Notifications
+# ============================================
+email:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  sender: "your-email@gmail.com"
+  password: "your-app-password"
+  recipients:
+    - "recipient@example.com"
+  hourly_summary: true
+  hourly_interval_minutes: 60
+
 # ============================================
 # CoinDesk API
 # ============================================
