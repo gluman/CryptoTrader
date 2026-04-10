@@ -31,7 +31,7 @@ class CryptoTraderScheduler:
         self.intervals = {
             'collect': 600,      # 10 minutes
             'sentiment': 1800,   # 30 minutes
-            'decide': 3600,      # 1 hour
+            'decide': 900,      # 15 minutes
             'execute': 300,      # 5 minutes (check SL/TP)
         }
         

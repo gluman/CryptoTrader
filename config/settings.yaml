@@ -190,6 +190,7 @@ agents:
   trading_decision:
     enabled: true
     event_driven: true
+    schedule_minutes: 15
     min_confidence: 0.6
   risk:
     enabled: true
