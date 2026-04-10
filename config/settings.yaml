@@ -86,7 +86,7 @@ cryptorank:
   base_url: "https://api.cryptorank.io/v2"
 
 # ============================================
-# OpenRouter LLM - используется для TradingDecisionAgent
+# OpenRouter LLM - используется для TradingDecisionAgent и SentimentAgent
 # ============================================
 openrouter:
   base_url: "https://openrouter.ai/api/v1"
@@ -95,7 +95,17 @@ openrouter:
   temperature: 0.3
   max_tokens: 1024
 
-# Ollama LLM - используется для SentimentAgent и RAGFlow embeddings
+# OpenCode Go LLM - резервный провайдер
+# ============================================
+opencode_go:
+  base_url: "https://opencode.ai/zen/go/v1"
+  model: "minimax-m2.5"
+  fallback_model: "minimax-m2.7"
+  temperature: 0.3
+  max_tokens: 1024
+  enabled: true
+
+# Ollama LLM - используется для RAGFlow embeddings
 # ============================================
 ollama:
   base_url: "http://192.168.0.94:11434"
