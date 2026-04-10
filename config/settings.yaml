@@ -203,8 +203,8 @@ agents:
     trailing_stop_distance_percent: 1.0
   executor:
     enabled: true
-    testnet_first: true
-    confirmation_required: true
+    testnet_first: false
+    confirmation_required: false
 
 # ============================================
 # Export Settings
