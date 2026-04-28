@@ -191,11 +191,12 @@ agents:
   trading_decision:
     enabled: true
     event_driven: true
-    min_confidence: 0.6
+    min_confidence: 0.35
   risk:
     enabled: true
-    max_position_percent: 5
-    max_daily_loss_percent: 3
+    min_position_usd: 5.0
+    max_position_usd: 5.0
+    min_confidence_for_max_size: 0.8
     default_stop_loss_percent: 2.0
     default_take_profit_percent: 4.0
     risk_reward_ratio: 2.0

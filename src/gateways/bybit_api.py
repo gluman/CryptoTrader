@@ -84,7 +84,9 @@ class BybitAPI:
             if method.upper() == 'GET':
                 resp = self.session.get(url, params=params, headers=headers, timeout=30)
             else:
-                resp = self.session.post(url, json=json_data, headers=headers, timeout=30)
+                # Use data= with pre-encoded body to ensure exact serialization matches signature
+                body_bytes = json.dumps(json_data, separators=(',', ':')).encode('utf-8') if json_data else None
+                resp = self.session.post(url, data=body_bytes, headers=headers, timeout=30)
             
             data = resp.json()
             
@@ -103,6 +105,24 @@ class BybitAPI:
         if symbol:
             params['symbol'] = symbol
         return self._make_request('GET', '/v5/market/tickers', params=params, auth=False)
+
+    def get_ticker(self, symbol: str, category: str = 'spot') -> Dict:
+        """Get single ticker — wraps get_tickers for compatibility"""
+        result = self.get_tickers(category=category, symbol=symbol)
+        # Extract single symbol from list
+        if 'result' in result and 'list' in result['result']:
+            items = result['result']['list']
+            if items:
+                item = items[0]
+                return {
+                    'symbol': item.get('symbol', symbol),
+                    'lastPrice': item.get('lastPrice', '0'),
+                    'highPrice24h': item.get('highPrice24h', '0'),
+                    'lowPrice24h': item.get('lowPrice24h', '0'),
+                    'volume24h': item.get('volume24h', '0'),
+                    'turnover24h': item.get('turnover24h', '0'),
+                }
+        return {'symbol': symbol, 'lastPrice': '0'}
     
     def get_kline(self, symbol: str, interval: str = '60', category: str = 'linear',
                   limit: int = 200) -> Dict:
@@ -232,10 +252,12 @@ class BybitAPI:
         return self._make_request('POST', '/v5/order/cancel-all', json_data=json_data)
     
     def get_open_orders(self, category: str = 'spot', symbol: Optional[str] = None) -> Dict:
-        """Get open orders"""
-        params = {'category': category}
+        """Get open orders - V5 API requires settleCoin or baseCoin for spot"""
+        params = {'category': category, 'limit': 100}
         if symbol:
             params['symbol'] = symbol
+        else:
+            params['settleCoin'] = 'USDT'
         return self._make_request('GET', '/v5/order/realtime', params=params)
     
     def get_order_history(self, category: str = 'spot', symbol: Optional[str] = None,

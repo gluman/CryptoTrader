@@ -7,9 +7,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
+from sqlalchemy import text, func
 from ..core.database import DatabaseManager, OHLCVRaw, Signal, Decision, Position
 from ..agents.sentiment_agent import SentimentAgent
 from ..gateways import RAGFlowAPI
+from .multi_agent_engine import MultiAgentDecisionEngine
 
 
 class TradingDecisionAgent(BaseAgent):
@@ -41,14 +43,18 @@ class TradingDecisionAgent(BaseAgent):
         )
         self.ragflow_enabled = bool(ragflow_cfg.get('api_key'))
     
-    def get_ohlcv_data(self, symbol: str, exchange: str = 'binance', 
+    def get_ohlcv_data(self, symbol: str, exchange: str = 'binance',
                        timeframe: str = '1h', limit: int = 200) -> pd.DataFrame:
         """Get OHLCV data from PostgreSQL"""
         with self.db.get_session() as session:
-            records = session.query(OHLCVRaw).filter_by(
-                exchange=exchange, symbol=symbol, timeframe=timeframe
+            # Case-insensitive: DB stores uppercase 'BYBIT', 'BINANCE', etc.
+            # Try with func.lower for cross-database compatibility
+            records = session.query(OHLCVRaw).filter(
+                func.lower(OHLCVRaw.exchange) == exchange.lower(),
+                OHLCVRaw.symbol == symbol,
+                OHLCVRaw.timeframe == timeframe
             ).order_by(OHLCVRaw.timestamp.desc()).limit(limit).all()
-            
+
             if not records:
                 return pd.DataFrame()
             
@@ -279,41 +285,48 @@ class TradingDecisionAgent(BaseAgent):
         return prompt
     
     def call_llm(self, prompt: str) -> Dict[str, Any]:
-        """Call OpenRouter for decision with Ollama fallback"""
+        """Call LLM: DeepSeek V4 Flash -> Ollama"""
         
-        # Try OpenRouter first
+        # Try DeepSeek first
         try:
-            result = self._call_openrouter(prompt)
+            result = self._call_deepseek(prompt)
             if result:
                 return result
         except Exception as e:
-            self.log('warning', f"OpenRouter failed: {e}, trying Ollama...")
+            self.log('warning', f"DeepSeek failed: {e}, trying Ollama...")
         
-        # Fallback to Ollama
+        # Last resort: Ollama
         return self._call_ollama(prompt)
     
-    def _call_openrouter(self, prompt: str) -> Dict[str, Any]:
-        """Call OpenRouter API"""
+    def _call_deepseek(self, prompt: str) -> Dict[str, Any]:
+        """Call DeepSeek V4 Flash API"""
+        import os
+        api_key = os.getenv('DEEPSEEK_API_KEY', '')
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY not set in .env")
+        
         headers = {
-            'Authorization': f'Bearer {self.api_key}',
+            'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json',
         }
         
         data = {
-            'model': self.model,
+            'model': 'deepseek-chat',
             'messages': [{'role': 'user', 'content': prompt}],
-            'temperature': self.config.openrouter.get('temperature', 0.3),
-            'max_tokens': self.config.openrouter.get('max_tokens', 512),
+            'temperature': 0.3,
+            'max_tokens': 512,
         }
         
         start = datetime.utcnow()
         resp = requests.post(
-            f"{self.api_base}/chat/completions",
+            'https://api.deepseek.com/chat/completions',
             headers=headers, json=data, timeout=60
         )
         latency = (datetime.utcnow() - start).total_seconds() * 1000
         
         result = resp.json()
+        if 'choices' not in result:
+            raise ValueError(f"DeepSeek error: {result}")
         content = result['choices'][0]['message']['content'].strip()
         
         # Try to parse JSON from response
@@ -325,6 +338,7 @@ class TradingDecisionAgent(BaseAgent):
         decision = json.loads(content.strip())
         decision['latency_ms'] = int(latency)
         decision['tokens'] = result.get('usage', {}).get('total_tokens', 0)
+        decision['model'] = 'deepseek-chat'
         
         return decision
     
@@ -544,6 +558,86 @@ class TradingDecisionAgent(BaseAgent):
         holds = sum(1 for d in decisions if d.get('signal') == 'HOLD')
         
         self.log('info', f"Cycle complete: {buys} BUY, {sells} SELL, {holds} HOLD")
+        
+        return {
+            'timestamp': datetime.utcnow().isoformat(),
+            'decisions': decisions,
+            'summary': {'buys': buys, 'sells': sells, 'holds': holds},
+        }
+
+    def run_once_multi_agent_for_symbol(self, symbol: str, exchange: str = 'binance',
+                                        timeframe: str = '1h') -> Dict[str, Any]:
+        """Generate trading decision using 6-block Multi-Agent Engine"""
+        
+        # 1. Get market data from DB
+        df = self.get_ohlcv_data(symbol, exchange, timeframe)
+        if df.empty:
+            return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data', 'blocks': {}}
+        
+        # 2. Get sentiment data
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24)
+        
+        # 3. Get open positions
+        positions = self.get_open_positions_for_symbol(symbol)
+        
+        # 4. Initialize Multi-Agent Engine (lazy init)
+        if not hasattr(self, '_multi_engine'):
+            self._multi_engine = MultiAgentDecisionEngine(self.config, self.log)
+        
+        # 5. Run multi-agent analysis
+        decision = self._multi_engine.analyze(df, symbol, sentiment)
+        
+        # 6. If position exists, consider SELL
+        if positions and decision['signal'] == 'BUY':
+            # Don't BUY if already holding — check if should HOLD or SELL instead
+            pos = positions[0]
+            pnl_pct = pos.get('unrealized_pnl_pct', 0)
+            if pnl_pct > 5:
+                decision['signal'] = 'SELL'
+                decision['reasoning'] += f' | Close existing position: PnL={pnl_pct:.1f}%'
+        
+        # 7. Build return compatible with old interface
+        result = {
+            'symbol': symbol,
+            'signal': decision['signal'],
+            'confidence': decision['confidence'],
+            'score': decision.get('score', 0.5),
+            'reasoning': decision.get('reasoning', ''),
+            'blocks': decision.get('blocks', {}),
+            'positions': positions,
+            'sentiment': sentiment,
+        }
+        
+        self.log('info', f"[MultiAgent] {symbol}: {decision['signal']} "
+                  f"(conf={decision['confidence']:.0%}, score={decision.get('score', 0):.2f})")
+        
+        return result
+    
+    def run_once_multi_agent(self) -> Dict[str, Any]:
+        """Generate decisions for all active symbols using Multi-Agent Engine"""
+        self.log('info', "Starting Multi-Agent decision cycle...")
+        
+        with self.db.get_session() as session:
+            from ..core.database import SelectedSymbol
+            symbols = session.query(SelectedSymbol).filter_by(is_active=True).all()
+            symbol_names = [s.symbol for s in symbols][:10]
+        
+        if not symbol_names:
+            symbol_names = ['BTCUSDT', 'ETHUSDT']
+        
+        decisions = []
+        for sym in symbol_names:
+            try:
+                result = self.run_once_multi_agent_for_symbol(sym)
+                decisions.append(result)
+            except Exception as e:
+                self.log('error', f"MultiAgent decision failed for {sym}: {e}")
+        
+        buys = sum(1 for d in decisions if d.get('signal') == 'BUY')
+        sells = sum(1 for d in decisions if d.get('signal') == 'SELL')
+        holds = sum(1 for d in decisions if d.get('signal') == 'HOLD')
+        
+        self.log('info', f"Multi-Agent cycle complete: {buys} BUY, {sells} SELL, {holds} HOLD")
         
         return {
             'timestamp': datetime.utcnow().isoformat(),

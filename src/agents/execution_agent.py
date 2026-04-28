@@ -29,6 +29,40 @@ class ExecutionAgent(BaseAgent):
         self.trailing_stop_enabled = risk_cfg.get('trailing_stop_enabled', True)
         self.trailing_activation_pct = risk_cfg.get('trailing_stop_activation_percent', 1.5)
         self.trailing_distance_pct = risk_cfg.get('trailing_stop_distance_percent', 1.0)
+        
+        # Dynamic position sizing: min 1%, max 5% of balance
+        self.min_position_pct = risk_cfg.get('min_position_percent', 1.0)
+        self.max_position_pct_dynamic = risk_cfg.get('max_position_percent', 5.0)
+        self.min_confidence_for_max_size = risk_cfg.get('min_confidence_for_max_size', 0.8)
+    
+    def calculate_position_size(self, confidence: float, exchange: str = 'bybit') -> float:
+        """
+        Calculate position size based on signal confidence.
+        confidence=0.35 → $3 (min trade)
+        confidence=1.0 → $5 (max trade) OR max 5% of balance if balance > $200
+        Linear interpolation between min/max dollar amounts.
+        """
+        usdt_balance = self.get_usdt_balance(exchange)
+        
+        # Map confidence to dollar amount ($5 min, $10 max)
+        min_trade = 5.0
+        max_trade = 10.0
+        
+        if confidence <= 0.35:
+            amount = min_trade
+        elif confidence >= 1.0:
+            amount = max_trade
+        else:
+            # Linear: map confidence to $3-$5
+            amount = min_trade + (confidence - 0.35) / 0.65 * (max_trade - min_trade)
+        
+        # Cap at max_position_pct of balance for large accounts
+        max_pct_amount = usdt_balance * self.max_position_pct_dynamic / 100
+        if max_pct_amount > max_trade * 2:
+            # For large balances, use percentage (5%) instead of fixed max
+            amount = max_pct_amount
+        
+        return round(amount, 2)
     
     def _init_exchanges(self):
         """Initialize exchange connections"""
@@ -65,10 +99,28 @@ class ExecutionAgent(BaseAgent):
                 symbol=symbol, exchange=exchange, status='OPEN'
             ).first()
     
-    def get_all_open_positions(self) -> List[Position]:
-        """Get all open positions"""
+    def get_all_open_positions(self) -> List[Dict]:
+        """Get all open positions as dicts to avoid DetachedInstanceError"""
         with self.db.get_session() as session:
-            return session.query(Position).filter_by(status='OPEN').all()
+            positions = session.query(Position).filter_by(status='OPEN').all()
+            # Detach from session by converting to dicts
+            return [
+                {
+                    'id': p.id,
+                    'symbol': p.symbol,
+                    'exchange': p.exchange,
+                    'side': p.side,
+                    'entry_price': float(p.entry_price) if p.entry_price else 0,
+                    'quantity': float(p.quantity) if p.quantity else 0,
+                    'stop_loss': float(p.stop_loss) if p.stop_loss else None,
+                    'take_profit': float(p.take_profit) if p.take_profit else None,
+                    'trailing_stop_activated': p.trailing_stop_activated,
+                    'trailing_stop_price': float(p.trailing_stop_price) if p.trailing_stop_price else None,
+                    'highest_price': float(p.highest_price) if p.highest_price else None,
+                    'lowest_price': float(p.lowest_price) if p.lowest_price else None,
+                }
+                for p in positions
+            ]
     
     def create_position(self, symbol: str, exchange: str, entry_price: float,
                         quantity: float, cost_usdt: float, signal_id: Optional[int] = None,
@@ -238,11 +290,15 @@ class ExecutionAgent(BaseAgent):
             
             elif exchange == 'bybit':
                 data = ex.get_wallet_balance('UNIFIED')
-                balances = data['result']['list'][0]['coin']
+                account = data['result']['list'][0]
+                total_avail = float(account.get('totalAvailableBalance') or 0)
+                total_equity = float(account.get('totalEquity') or 0)
+                balances = account['coin']
                 return {'exchange': exchange, 'balances': [
-                    {'asset': b['coin'], 'free': float(b['availableToWithdraw']), 
-                     'total': float(b['walletBalance'])}
-                    for b in balances if float(b['walletBalance']) > 0
+                    {'asset': b['coin'], 'free': float(b.get('availableToWithdraw') or 0) if b.get('availableToWithdraw', '') != '' else float(b.get('walletBalance', 0)),
+                     'total': float(b.get('walletBalance') or 0),
+                     'available': total_avail if b['coin'] == 'USDT' else float(b.get('availableToWithdraw') or 0)}
+                    for b in balances if float(b.get('walletBalance', 0) or 0) > 0
                 ]}
             
             elif exchange == 'bitfinex':
@@ -260,11 +316,112 @@ class ExecutionAgent(BaseAgent):
     def get_usdt_balance(self, exchange: str = 'binance') -> float:
         """Get USDT balance for trading"""
         balance = self.get_balance(exchange)
+        if 'error' in balance:
+            return 0.0
         for b in balance.get('balances', []):
             if b['asset'] == 'USDT':
-                return b['free']
+                return b.get('available', b.get('free', 0))
         return 0.0
-    
+
+    def cleanup_stale_orders(self, exchange: str = 'bybit', max_age_hours: int = 24) -> Dict:
+        """Cancel all open orders older than max_age_hours (stale cleanup)"""
+        result = {'cancelled': 0, 'errors': 0, 'details': []}
+        ex = self.exchanges.get(exchange)
+        if not ex:
+            return {'error': f'Unknown exchange: {exchange}'}
+
+        try:
+            open_orders = ex.get_open_orders(category='spot')
+            if open_orders.get('retCode') != 0:
+                return {'error': open_orders.get('retMsg', 'Unknown error')}
+
+            orders = open_orders.get('result', {}).get('list', [])
+            if not orders:
+                return result
+
+            self.log('info', f"Found {len(orders)} open orders on {exchange}")
+
+            # Cancel all open orders (aggressive cleanup)
+            if exchange == 'bybit':
+                # Cancel by settleCoin to clear all USDT orders
+                cancel_result = ex.cancel_all_orders(category='spot')
+                if cancel_result.get('retCode') == 0:
+                    cancelled_list = cancel_result.get('result', {}).get('list', [])
+                    result['cancelled'] = len(cancelled_list)
+                    for o in cancelled_list:
+                        result['details'].append(f"Cancelled orderId={o.get('orderId')}")
+                    self.log('info', f"Cleaned up {result['cancelled']} stale orders on {exchange}")
+                else:
+                    result['errors'] = 1
+                    self.log('error', f"Failed to cancel orders: {cancel_result}")
+            else:
+                # Per-symbol cancellation for other exchanges
+                symbols = set(o.get('symbol') for o in orders)
+                for symbol in symbols:
+                    cancel_r = ex.cancel_all_orders(category='spot', symbol=symbol)
+                    if cancel_r.get('retCode') == 0:
+                        result['cancelled'] += len(cancel_r.get('result', {}).get('list', []))
+                    else:
+                        result['errors'] += 1
+
+        except Exception as e:
+            self.log('error', f"cleanup_stale_orders failed: {e}")
+            result['errors'] += 1
+
+        return result
+
+    def _round_bybit_qty(self, symbol: str, quote_amount: str, exchange: str = 'bybit') -> str:
+        """
+        Round quantity to Bybit step size for spot market buy.
+        Fetches instrument info and rounds to the nearest qty step.
+        """
+        try:
+            ex = self.exchanges.get(exchange)
+            if not ex:
+                return quote_amount
+            
+            info = ex.get_instruments_info(category='spot', symbol=symbol)
+            if info.get('retCode') != 0:
+                self.log('warning', f"get_instruments_info failed: {info.get('retMsg')}")
+                return quote_amount
+            
+            result = info.get('result', {})
+            if not result or 'list' not in result or not result['list']:
+                return quote_amount
+            
+            lot_filter = result['list'][0].get('lotSizeFilter', {})
+            step = float(lot_filter.get('basePrecision', lot_filter.get('qtyStep', '1')))
+            
+            # Calculate qty from quote amount and current price
+            ticker = ex.get_ticker(symbol)
+            price = float(ticker.get('lastPrice', 0))
+            if price <= 0:
+                return quote_amount
+            
+            base_qty = float(quote_amount) / price
+            rounded = round(base_qty / step) * step
+            
+            # Ensure at least 1 step
+            if rounded < step:
+                rounded = step
+            
+            # Ensure quote value meets Bybit minimum ($5 for spot)
+            lot_filter = result['list'][0].get('lotSizeFilter', {})
+            min_order_amt = float(lot_filter.get('minOrderAmt', 5))
+            min_qty_for_min_amt = min_order_amt / price
+            if rounded * price < min_order_amt:
+                # Round up to meet minimum
+                rounded = round(min_qty_for_min_amt / step) * step
+                if rounded * price < min_order_amt:
+                    rounded += step
+            
+            qty_str = str(rounded)
+            self.log('debug', f"_round_bybit_qty: {symbol} quote={quote_amount} price={price} → qty={qty_str} (step={step})")
+            return qty_str
+        except Exception as e:
+            self.log('warning', f"_round_bybit_qty failed: {e}")
+            return quote_amount
+
     # ==================== Order Execution ====================
     
     def execute_spot_buy(self, symbol: str, quote_amount: str, 
@@ -288,9 +445,11 @@ class ExecutionAgent(BaseAgent):
                 }
             
             elif exchange == 'bybit':
-                result = ex.create_spot_buy(symbol, quote_amount)
+                # Round qty to Bybit step size
+                qty = self._round_bybit_qty(symbol, quote_amount, exchange='bybit')
+                result = ex.create_spot_buy(symbol, qty)
                 order_id = result['result'].get('orderId')
-                self.log('info', f"Bybit BUY {symbol}: {quote_amount} USDT → orderId={order_id}")
+                self.log('info', f"Bybit BUY {symbol}: {quote_amount} USDT → qty={qty} → orderId={order_id}")
                 return {
                     'exchange': exchange,
                     'symbol': symbol,
@@ -451,8 +610,8 @@ class ExecutionAgent(BaseAgent):
         for pos in open_positions:
             try:
                 # Get current price from exchange
-                exchange = pos.exchange
-                symbol = pos.symbol
+                exchange = pos['exchange']
+                symbol = pos['symbol']
                 ex = self.exchanges.get(exchange)
                 
                 if not ex:
@@ -470,7 +629,7 @@ class ExecutionAgent(BaseAgent):
                 
                 for trigger in triggers:
                     # Execute the sell
-                    qty = str(float(pos.quantity))
+                    qty = str(pos['quantity'])
                     result = self.execute_spot_sell(symbol, qty, exchange)
                     
                     if 'error' not in result:
@@ -496,7 +655,7 @@ class ExecutionAgent(BaseAgent):
                         self.log('info', f"{close_reason} triggered for {symbol} @ ${current_price:.4f}")
             
             except Exception as e:
-                self.log('error', f"SL/TP check failed for {pos.symbol}: {e}")
+                self.log('error', f"SL/TP check failed for {pos.get('symbol', '?')}: {e}")
         
         return {'triggered': triggered, 'details': details}
     
@@ -523,9 +682,9 @@ class ExecutionAgent(BaseAgent):
                     self.update_signal_status(signal.id, 'SKIPPED')
                     continue
                 
-                # Calculate position size
-                usdt_balance = self.get_usdt_balance(exchange)
-                amount = usdt_balance * self.max_position_pct / 100
+                # Calculate position size based on signal confidence
+                signal_confidence = float(signal.confidence or 0.35)
+                amount = self.calculate_position_size(signal_confidence, exchange)
                 
                 if amount < 10:  # Minimum $10
                     self.log('warning', f"Insufficient balance for {symbol}: ${amount:.2f}")
@@ -535,21 +694,21 @@ class ExecutionAgent(BaseAgent):
                 # Execute buy
                 amount_str = str(round(amount, 2))
                 result = self.execute_spot_buy(symbol, amount_str, exchange)
-                
+
                 if 'error' in result:
                     errors += 1
                     self.log('error', f"BUY failed for {symbol}: {result['error']}")
                     self.update_signal_status(signal.id, 'FAILED')
                     continue
-                
+
                 # Save trade
                 trade_id = self.save_trade_to_db(signal.id, result)
-                
+
                 # Get entry price
                 executed_qty = float(result.get('executed_qty', 0))
                 cost = float(result.get('cummulative_quote_qty', amount))
                 entry_price = cost / executed_qty if executed_qty > 0 else 0
-                
+
                 # Create position with SL/TP
                 self.create_position(
                     symbol=symbol,
@@ -560,14 +719,16 @@ class ExecutionAgent(BaseAgent):
                     signal_id=signal.id,
                     trade_id=trade_id,
                 )
-                
+
                 executed += 1
+                self.log('info', f"BUY {symbol} | conf={signal_confidence:.0%} | ${amount:.2f} ({amount/self.get_usdt_balance(exchange)*100:.1f}% balance)")
                 details.append({
                     'type': 'BUY',
                     'symbol': symbol,
                     'price': entry_price,
                     'quantity': executed_qty,
                     'cost': cost,
+                    'confidence': signal_confidence,
                 })
             
             except Exception as e:

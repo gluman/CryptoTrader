@@ -5,6 +5,7 @@ from .sentiment_agent import SentimentAgent
 from .trading_agent import TradingDecisionAgent
 from .execution_agent import ExecutionAgent
 from .telegram_notifier import TelegramNotifier
+from .multi_agent_engine import MultiAgentDecisionEngine
 
 __all__ = [
     'BaseAgent', 
@@ -12,5 +13,6 @@ __all__ = [
     'SentimentAgent', 
     'TradingDecisionAgent',
     'ExecutionAgent',
-    'TelegramNotifier'
+    'TelegramNotifier',
+    'MultiAgentDecisionEngine',
 ]
