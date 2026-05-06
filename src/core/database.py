@@ -2,7 +2,7 @@ import logging
 from decimal import Decimal as PyDecimal
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, Column, BigInteger, String, DateTime, Boolean, Integer, Text, JSON, Numeric, UniqueConstraint, text
+from sqlalchemy import create_engine, Column, BigInteger, String, DateTime, Boolean, Integer, Text, JSON, Numeric, UniqueConstraint, text, ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
@@ -80,6 +80,7 @@ class NewsRaw(Base):
     sentiment_score = Column(Numeric(3, 2))
     sentiment_source = Column(String(50))
     ragflow_document_id = Column(String(255))
+    symbols = Column(ARRAY(String), default=[])
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 class Signal(Base):

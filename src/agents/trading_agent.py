@@ -591,7 +591,7 @@ class TradingDecisionAgent(BaseAgent):
         indicators = self.calculate_indicators(df)
         
         # 3. Get sentiment
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24)
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
         
         # 4. Get recent signals
         recent = self.get_recent_signals(symbol)
@@ -672,7 +672,7 @@ class TradingDecisionAgent(BaseAgent):
             return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data', 'blocks': {}}
         
         # 2. Get sentiment data
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24)
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
         
         # 3. Get open positions
         positions = self.get_open_positions_for_symbol(symbol)
@@ -763,7 +763,7 @@ class TradingDecisionAgent(BaseAgent):
         indicators = self.calculate_indicators(df)
 
         # 3. Get sentiment
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24)
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
 
         # 4. Get recent signals
         recent = self.get_recent_signals(symbol)
@@ -827,7 +827,7 @@ class TradingDecisionAgent(BaseAgent):
             return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data'}
 
         indicators = self.calculate_indicators(df)
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24)
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
         positions = self.get_open_positions_for_symbol(symbol)
 
         multi_result = self._multi_engine.analyze(df, symbol, sentiment)

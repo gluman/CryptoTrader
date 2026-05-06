@@ -185,15 +185,20 @@ Sentiment score:"""
         except (ValueError, TypeError):
             return 0.0
     
-    def get_unanalyzed_news(self, hours: int = 24) -> List[Dict]:
-        """Get news items without sentiment score"""
+    def get_unanalyzed_news(self, hours: int = 24, symbol: str = None) -> List[Dict]:
+        """Get news items without sentiment score, optionally filtered by symbol."""
         since = datetime.utcnow() - timedelta(hours=hours)
         
         with self.db.get_session() as session:
-            news = session.query(NewsRaw).filter(
+            query = session.query(NewsRaw).filter(
                 NewsRaw.published_at >= since,
                 NewsRaw.sentiment_score.is_(None)
-            ).order_by(NewsRaw.published_at.desc()).limit(20).all()
+            )
+            news = query.order_by(NewsRaw.published_at.desc()).limit(20).all()
+            
+            # Filter by symbol if provided
+            if symbol:
+                news = [n for n in news if n.symbols and symbol.upper() in n.symbols]
             
             return [
                 {
@@ -202,6 +207,7 @@ Sentiment score:"""
                     'summary': n.summary or '',
                     'source': n.source,
                     'url': n.url,
+                    'symbols': n.symbols or [],
                 }
                 for n in news
             ]
@@ -214,15 +220,21 @@ Sentiment score:"""
                 news.sentiment_score = score
                 news.sentiment_source = 'openrouter'
     
-    def get_aggregated_sentiment(self, hours: int = 24) -> Dict[str, Any]:
-        """Get aggregated sentiment for recent news"""
+    def get_aggregated_sentiment(self, hours: int = 24, symbol: str = None) -> Dict[str, Any]:
+        """Get aggregated sentiment for recent news, optionally filtered by symbol."""
         since = datetime.utcnow() - timedelta(hours=hours)
         
         with self.db.get_session() as session:
-            news = session.query(NewsRaw).filter(
+            query = session.query(NewsRaw).filter(
                 NewsRaw.published_at >= since,
                 NewsRaw.sentiment_score.isnot(None)
-            ).all()
+            )
+            
+            # Filter by symbol if provided
+            if symbol:
+                query = query.filter(NewsRaw.symbols.op('@>')([symbol.upper()]))
+            
+            news = query.all()
             
             if not news:
                 return {

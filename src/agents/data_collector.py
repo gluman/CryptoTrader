@@ -153,6 +153,43 @@ class DataCollectorAgent(BaseAgent):
             result = session.execute(stmt)
             return result.rowcount
     
+    def _extract_symbols(self, title: str, summary: str = '') -> List[str]:
+        """Extract trading symbols from news title/summary.
+        
+        Maps mentions to tradable pairs: BTC, ETH, SOL, XRP, ADA, etc.
+        Simple case-insensitive substring matching.
+        """
+        text = (title + ' ' + summary).upper()
+        
+        # Symbol → list of aliases to match
+        symbol_map = {
+            'BTC': ['BITCOIN', 'BTC', 'BTCUSDT'],
+            'ETH': ['ETHEREUM', 'ETHER', 'ETH', 'ETHUSDT'],
+            'SOL': ['SOLANA', 'SOLUSDT', 'SOL'],
+            'XRP': ['XRP', 'XRPUSDT'],
+            'ADA': ['ADA', 'ADAUSDT'],
+            'DOGE': ['DOGECOIN', 'DOGEUSDT', 'DOGE'],
+            'DOT': ['POLKADOT', 'DOTUSDT'],
+            'AVAX': ['AVALANCHE', 'AVAXUSDT'],
+            'LINK': ['CHAINLINK', 'LINKUSDT'],
+            'MATIC': ['POLYGON', 'MATICUSDT'],
+            'UNI': ['UNISWAP', 'UNIUSDT'],
+            'ATOM': ['COSMOS', 'ATOMUSDT'],
+            'LTC': ['LITECOIN', 'LTCUSDT'],
+            'BCH': ['BITCOIN CASH', 'BCH'],
+            'BNB': ['BNB', 'BINANCE COIN'],
+        }
+        
+        found = []
+        for symbol, aliases in symbol_map.items():
+            for alias in aliases:
+                if alias.upper() in text:
+                    if symbol not in found:
+                        found.append(symbol)
+                    break
+        
+        return found[:5]
+
     def fetch_rss_news(self, timeout_seconds: int = 5) -> List[Dict]:
         """Parse RSS news feeds with timeout"""
         import socket
@@ -173,13 +210,18 @@ class DataCollectorAgent(BaseAgent):
                     continue
                     
                 for entry in parsed.entries[:10]:
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')[:500]
+                    symbols = self._extract_symbols(title, summary)
+                    
                     news_item = {
                         'source': feed['name'],
-                        'title': entry.get('title', ''),
+                        'title': title,
                         'url': entry.get('link', ''),
                         'published_at': datetime.utcnow(),
-                        'summary': entry.get('summary', '')[:500],
+                        'summary': summary,
                         'language': feed.get('language', 'en'),
+                        'symbols': symbols,
                     }
                     all_news.append(news_item)
                     
