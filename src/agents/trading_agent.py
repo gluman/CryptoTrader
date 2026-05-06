@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
 from sqlalchemy import text, func
-from ..core.database import DatabaseManager, OHLCVRaw, Signal, Decision, Position
+from ..core.database import DatabaseManager, OHLCVRaw, Signal, Decision, Position, StrategySignal
 from ..agents.sentiment_agent import SentimentAgent
 from .multi_agent_engine import MultiAgentDecisionEngine
 
@@ -575,6 +575,22 @@ class TradingDecisionAgent(BaseAgent):
                 total_tokens=decision.get('tokens', 0),
             )
             session.add(decision_log)
+
+            # Also create StrategySignal for BUY/SELL — ExecutionAgent reads from this table
+            if decision['signal'] in ('BUY', 'SELL'):
+                ss = StrategySignal(
+                    symbol=symbol,
+                    strategy='scalping',
+                    action=decision['signal'],
+                    confidence=decision['confidence'],
+                    entry_price=indicators.get('price'),
+                    stop_loss=decision.get('stop_loss'),
+                    take_profit=decision.get('take_profit'),
+                    reasoning=decision.get('reasoning', ''),
+                    status='pending',
+                    exchange=exchange,
+                )
+                session.add(ss)
             
             return signal_id
     
