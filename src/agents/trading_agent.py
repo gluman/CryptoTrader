@@ -590,8 +590,9 @@ class TradingDecisionAgent(BaseAgent):
         # 2. Calculate indicators
         indicators = self.calculate_indicators(df)
         
-        # 3. Get sentiment
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
+        # 3. Get sentiment (per-symbol, strip USDT/USDC suffix)
+        symbol_base = symbol.replace('USDT', '').replace('USDC', '')
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol_base)
         
         # 4. Get recent signals
         recent = self.get_recent_signals(symbol)
@@ -671,8 +672,9 @@ class TradingDecisionAgent(BaseAgent):
         if df.empty:
             return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data', 'blocks': {}}
         
-        # 2. Get sentiment data
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
+        # 3. Get sentiment (per-symbol, strip USDT/USDC suffix)
+        symbol_base = symbol.replace('USDT', '').replace('USDC', '')
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol_base)
         
         # 3. Get open positions
         positions = self.get_open_positions_for_symbol(symbol)
@@ -762,8 +764,9 @@ class TradingDecisionAgent(BaseAgent):
         # 2. Calculate indicators
         indicators = self.calculate_indicators(df)
 
-        # 3. Get sentiment
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
+        # 3. Get sentiment (per-symbol, strip USDT/USDC suffix)
+        symbol_base = symbol.replace('USDT', '').replace('USDC', '')
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol_base)
 
         # 4. Get recent signals
         recent = self.get_recent_signals(symbol)
@@ -826,8 +829,9 @@ class TradingDecisionAgent(BaseAgent):
         if df.empty:
             return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data'}
 
-        indicators = self.calculate_indicators(df)
-        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol)
+        # 3. Get sentiment (per-symbol, strip USDT/USDC suffix)
+        symbol_base = symbol.replace('USDT', '').replace('USDC', '')
+        sentiment = self.sentiment.get_aggregated_sentiment(hours=24, symbol=symbol_base)
         positions = self.get_open_positions_for_symbol(symbol)
 
         multi_result = self._multi_engine.analyze(df, symbol, sentiment)

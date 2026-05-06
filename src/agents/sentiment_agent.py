@@ -225,16 +225,14 @@ Sentiment score:"""
         since = datetime.utcnow() - timedelta(hours=hours)
         
         with self.db.get_session() as session:
-            query = session.query(NewsRaw).filter(
+            news = session.query(NewsRaw).filter(
                 NewsRaw.published_at >= since,
                 NewsRaw.sentiment_score.isnot(None)
-            )
+            ).all()
             
-            # Filter by symbol if provided
+            # Filter by symbol if provided (Python-side filtering)
             if symbol:
-                query = query.filter(NewsRaw.symbols.op('@>')([symbol.upper()]))
-            
-            news = query.all()
+                news = [n for n in news if n.symbols and symbol.upper() in n.symbols]
             
             if not news:
                 return {
