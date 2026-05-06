@@ -1,6 +1,21 @@
-"""Run full pipeline"""
+"""Run full pipeline
+Usage:
+  python run_pipeline.py rule --market spot   — Spot trading only (default)
+  python run_pipeline.py rule --market linear — Linear futures only
+  python run_pipeline.py llm --market spot     — LLM evaluated, spot
+  python run_pipeline.py test                  — Test mode both
+"""
 import sys
-sys.path.insert(0, '.')
+
+MODE = sys.argv[1] if len(sys.argv) > 1 else 'llm'  # 'llm', 'rule', 'test'
+MARKET = 'spot'
+for arg in sys.argv:
+    if arg.startswith('--market='):
+        MARKET = arg.split('=')[1]  # 'spot' or 'linear'
+    elif arg == '--spot':
+        MARKET = 'spot'
+    elif arg == '--linear':
+        MARKET = 'linear'
 
 # Reset config singleton
 from src.core.config import Config
@@ -18,8 +33,8 @@ print("=" * 60)
 print("CRYPTO TRADER - RUNNING FULL PIPELINE")
 print("=" * 60)
 print(f"PostgreSQL: {config.postgresql.get('host')}:{config.postgresql.get('port')}")
-print(f"Binance testnet: {config.binance.get('testnet')}")
-print(f"Model: {config.openrouter.get('model')}")
+print(f"Market type: {MARKET}")
+print(f"Mode: {MODE}")
 print("=" * 60)
 
 # Init Telegram notifier
@@ -60,16 +75,29 @@ try:
     print(f"  Bullish ratio: {agg.get('bullish_ratio', 0):.0%}")
     
     # Step 3: Trading decisions
-    print("\n[3/4] Generating trading decisions...")
-    decision_result = trading.run_once()
+    print(f"\n[3/4] Generating trading decisions ({MODE}-based)...")
+    if MODE == 'rule':
+        decision_result = trading.run_once_rule_based()
+    elif MODE == 'llm':
+        decision_result = trading.run_once_llm_evaluated()
+    elif MODE == 'test':
+        print("  [TEST MODE] Running both rule-based and LLM-evaluated...")
+        rule_result = trading.run_once_rule_based()
+        llm_result = trading.run_once_llm_evaluated()
+        decision_result = {'rule': rule_result, 'llm': llm_result, 'mode': 'test'}
+        print(f"  Rule-based: BUY={rule_result['summary']['buys']}, SELL={rule_result['summary']['sells']}, HOLD={rule_result['summary']['holds']}")
+        print(f"  LLM-eval:   BUY={llm_result['summary']['buys']}, SELL={llm_result['summary']['sells']}, HOLD={llm_result['summary']['holds']}")
+        decision_result = rule_result  # Use rule-based for execution
+    else:
+        decision_result = trading.run_once_llm_evaluated()
     summary = decision_result.get('summary', {})
     print(f"  BUY: {summary.get('buys', 0)}")
     print(f"  SELL: {summary.get('sells', 0)}")
     print(f"  HOLD: {summary.get('holds', 0)}")
     
     # Step 4: Execute
-    print("\n[4/4] Executing trades...")
-    exec_result = executor.run_once()
+    print(f"\n[4/4] Executing trades ({MARKET})...")
+    exec_result = executor.run_once(market_type=MARKET)
     print(f"  Executed: {exec_result.get('executed', 0)}")
     print(f"  SL/TP triggered: {exec_result.get('sl_tp_triggered', 0)}")
     
@@ -77,8 +105,12 @@ try:
     if positions:
         print(f"\n  Open positions ({len(positions)}):")
         for p in positions:
-            print(f"    {p.symbol}: entry={float(p.entry_price):.2f}, qty={float(p.quantity):.6f}")
-            print(f"      SL={float(p.stop_loss) if p.stop_loss else 'N/A'}, TP={float(p.take_profit) if p.take_profit else 'N/A'}")
+            if isinstance(p, dict):
+                print(f"    {p['symbol']} ({p.get('market_type','?')}): entry=${p.get('entry_price',0):.2f}, qty={p.get('quantity',0):.6f}")
+                print(f"      SL={p.get('stop_loss','N/A')}, TP={p.get('take_profit','N/A')}")
+            else:
+                print(f"    {p.symbol}: entry={float(p.entry_price):.2f}, qty={float(p.quantity):.6f}")
+                print(f"      SL={float(p.stop_loss) if p.stop_loss else 'N/A'}, TP={float(p.take_profit) if p.take_profit else 'N/A'}")
     
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")

@@ -88,6 +88,7 @@ class Signal(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False)
     exchange = Column(String(50), nullable=False)
+    market_type = Column(String(20), nullable=False, default='spot')  # 'spot' or 'linear'
     timeframe = Column(String(10), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     signal_type = Column(String(10), nullable=False)
@@ -110,6 +111,29 @@ class Signal(Base):
     ragflow_decision_id = Column(String(255))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class StrategySignal(Base):
+    """Signals from rule-based strategies (Scalping, Intraday, Position)"""
+    __tablename__ = 'strategy_signals'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    strategy = Column(String(20), nullable=False, index=True)  # Scalping, Intraday, Position
+    action = Column(String(10), nullable=False)  # BUY, SELL, HOLD
+    confidence = Column(Numeric(5, 4), nullable=False)
+    entry_price = Column(Numeric(20, 8))
+    stop_loss = Column(Numeric(20, 8))
+    take_profit = Column(Numeric(20, 8))
+    timeframes = Column(String(50))  # comma-separated TF list
+    reasoning = Column(Text)
+    status = Column(String(20), default='pending')  # pending, executed, cancelled
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    executed_at = Column(DateTime(timezone=True))
+    pnl_percent = Column(Numeric(10, 4))
+    pnl_absolute = Column(Numeric(20, 8))
+    exchange = Column(String(50), default='bybit')
+
 
 class Decision(Base):
     __tablename__ = 'decisions'
@@ -170,6 +194,7 @@ class Position(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False)
     exchange = Column(String(50), nullable=False)
+    market_type = Column(String(20), nullable=False, default='spot')  # 'spot' or 'linear'
     side = Column(String(10), nullable=False, default='LONG')
     entry_price = Column(Numeric(20, 8), nullable=False)
     quantity = Column(Numeric(30, 8), nullable=False)
@@ -191,6 +216,7 @@ class Position(Base):
     signal_id = Column(BigInteger)
     trade_id = Column(BigInteger)
     notes = Column(Text)
+    leverage = Column(Integer, default=1)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -294,3 +320,18 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Database connection failed: {e}")
             return False
+
+    def log_agent(self, agent_name: str, level: str, message: str, data: Any = None):
+        """Write to agent_logs table"""
+        try:
+            with self.get_session() as session:
+                log = AgentLog(
+                    agent_name=agent_name,
+                    level=level.upper(),
+                    message=message[:2000],
+                    data_json=data
+                )
+                session.add(log)
+                session.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to write agent_log: {e}")

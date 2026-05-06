@@ -32,6 +32,7 @@ class BaseAgent(ABC):
         getattr(self.logger, level)(f"[{self.name}] {message}")
     
     def log_to_db(self, level: str, message: str, data: Any = None):
-        """Log to database (agent_logs table)"""
+        """Log to database (agent_logs table) and console"""
         self.log(level, message)
-        # Database logging handled by DatabaseManager
+        if hasattr(self, 'db') and self.db:
+            self.db.log_agent(self.name, level, message, data)

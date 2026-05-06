@@ -6,7 +6,6 @@ from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
 from ..core.database import DatabaseManager, NewsRaw
-from ..gateways import RAGFlowAPI
 
 
 class SentimentAgent(BaseAgent):
@@ -27,15 +26,8 @@ class SentimentAgent(BaseAgent):
         self.temperature = config.openrouter.get('temperature', 0.3)
         self.max_tokens = config.openrouter.get('max_tokens', 1024)
         
-        # Initialize RAGFlow
-        ragflow_cfg = config.ragflow
-        self.ragflow = RAGFlowAPI(
-            base_url=ragflow_cfg.get('base_url', ''),
-            api_key=ragflow_cfg.get('api_key', ''),
-            dataset_id=ragflow_cfg.get('dataset_id'),
-            logger=logger
-        )
-        self.ragflow_enabled = bool(ragflow_cfg.get('api_key'))
+        self.ragflow_enabled = False
+        self.ragflow = None
     
     def call_llm_ollama(self, prompt: str) -> str:
         """Call Ollama API with fallback to alternate model"""
@@ -129,6 +121,54 @@ class SentimentAgent(BaseAgent):
             self.log('error', f"LLM call failed: {e}")
             return "0.0"
     
+    def _call_deepseek(self, prompt: str) -> str:
+        """Call DeepSeek V4 Flash API for sentiment scoring"""
+        import os
+        api_key = os.getenv('DEEPSEEK_API_KEY', '')
+        if not api_key:
+            self.log('error', "DEEPSEEK_API_KEY not set")
+            return "0.0"
+
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        }
+
+        data = {
+            'model': 'deepseek-chat',
+            'messages': [{'role': 'user', 'content': prompt}],
+            'temperature': 0.1,
+            'max_tokens': 50,
+        }
+
+        try:
+            resp = requests.post(
+                'https://api.deepseek.com/chat/completions',
+                headers=headers, json=data, timeout=30
+            )
+            if resp.status_code != 200:
+                self.log('error', f"DeepSeek status {resp.status_code}: {resp.text[:200]}")
+                return "0.0"
+
+            result = resp.json()
+            if 'choices' not in result or not result['choices']:
+                self.log('error', f"DeepSeek no choices: {result}")
+                return "0.0"
+
+            content = result['choices'][0]['message']['content'].strip()
+            if not content:
+                return "0.0"
+
+            # Extract numeric value
+            import re
+            match = re.search(r'[-+]?\d*\.?\d+', content)
+            if match:
+                return match.group()
+            return "0.0"
+        except Exception as e:
+            self.log('error', f"DeepSeek call failed: {e}")
+            return "0.0"
+
     def analyze_sentiment(self, title: str, summary: str = '') -> float:
         """Analyze sentiment of a single news item (-1 to +1)"""
         prompt = f"""Rate the crypto market sentiment of this news on a scale from -1.0 (very bearish) to +1.0 (very bullish). Return ONLY a number.
@@ -137,19 +177,9 @@ Title: {title}
 Summary: {summary[:200]}
 
 Sentiment score:"""
-        
-        # Try OpenRouter first
+
+        result = self._call_deepseek(prompt)
         try:
-            result = self.call_llm(prompt)
-            if result != "0.0":
-                score = float(result.replace('"', '').strip())
-                return max(-1.0, min(1.0, score))
-        except (ValueError, TypeError):
-            pass
-        
-        # Fallback to Ollama
-        try:
-            result = self.call_llm_ollama(prompt)
             score = float(result.replace('"', '').strip())
             return max(-1.0, min(1.0, score))
         except (ValueError, TypeError):

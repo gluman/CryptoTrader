@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List
 from decimal import Decimal
 from .base import BaseAgent
 from ..core.config import Config
-from ..core.database import DatabaseManager, Signal, Trade, Position
+from ..core.database import DatabaseManager, Signal, Trade, Position, StrategySignal
 from ..gateways import BinanceAPI, BybitAPI, BitfinexAPI
 
 
@@ -29,40 +29,6 @@ class ExecutionAgent(BaseAgent):
         self.trailing_stop_enabled = risk_cfg.get('trailing_stop_enabled', True)
         self.trailing_activation_pct = risk_cfg.get('trailing_stop_activation_percent', 1.5)
         self.trailing_distance_pct = risk_cfg.get('trailing_stop_distance_percent', 1.0)
-        
-        # Dynamic position sizing: min 1%, max 5% of balance
-        self.min_position_pct = risk_cfg.get('min_position_percent', 1.0)
-        self.max_position_pct_dynamic = risk_cfg.get('max_position_percent', 5.0)
-        self.min_confidence_for_max_size = risk_cfg.get('min_confidence_for_max_size', 0.8)
-    
-    def calculate_position_size(self, confidence: float, exchange: str = 'bybit') -> float:
-        """
-        Calculate position size based on signal confidence.
-        confidence=0.35 → $3 (min trade)
-        confidence=1.0 → $5 (max trade) OR max 5% of balance if balance > $200
-        Linear interpolation between min/max dollar amounts.
-        """
-        usdt_balance = self.get_usdt_balance(exchange)
-        
-        # Map confidence to dollar amount ($5 min, $10 max)
-        min_trade = 5.0
-        max_trade = 10.0
-        
-        if confidence <= 0.35:
-            amount = min_trade
-        elif confidence >= 1.0:
-            amount = max_trade
-        else:
-            # Linear: map confidence to $3-$5
-            amount = min_trade + (confidence - 0.35) / 0.65 * (max_trade - min_trade)
-        
-        # Cap at max_position_pct of balance for large accounts
-        max_pct_amount = usdt_balance * self.max_position_pct_dynamic / 100
-        if max_pct_amount > max_trade * 2:
-            # For large balances, use percentage (5%) instead of fixed max
-            amount = max_pct_amount
-        
-        return round(amount, 2)
     
     def _init_exchanges(self):
         """Initialize exchange connections"""
@@ -100,33 +66,34 @@ class ExecutionAgent(BaseAgent):
             ).first()
     
     def get_all_open_positions(self) -> List[Dict]:
-        """Get all open positions as dicts to avoid DetachedInstanceError"""
+        """Get all open positions as dicts (avoids DetachedInstanceError)"""
         with self.db.get_session() as session:
             positions = session.query(Position).filter_by(status='OPEN').all()
-            # Detach from session by converting to dicts
+            # Extract all needed fields while session is open
             return [
                 {
                     'id': p.id,
                     'symbol': p.symbol,
                     'exchange': p.exchange,
-                    'side': p.side,
-                    'entry_price': float(p.entry_price) if p.entry_price else 0,
-                    'quantity': float(p.quantity) if p.quantity else 0,
-                    'stop_loss': float(p.stop_loss) if p.stop_loss else None,
-                    'take_profit': float(p.take_profit) if p.take_profit else None,
+                    'quantity': p.quantity,
+                    'entry_price': p.entry_price,
+                    'stop_loss': p.stop_loss,
+                    'take_profit': p.take_profit,
+                    'market_type': p.market_type,
                     'trailing_stop_activated': p.trailing_stop_activated,
-                    'trailing_stop_price': float(p.trailing_stop_price) if p.trailing_stop_price else None,
-                    'highest_price': float(p.highest_price) if p.highest_price else None,
-                    'lowest_price': float(p.lowest_price) if p.lowest_price else None,
+                    'trailing_stop_price': p.trailing_stop_price,
+                    'highest_price': p.highest_price,
+                    'lowest_price': p.lowest_price,
                 }
                 for p in positions
             ]
     
     def create_position(self, symbol: str, exchange: str, entry_price: float,
                         quantity: float, cost_usdt: float, signal_id: Optional[int] = None,
-                        trade_id: Optional[int] = None, 
+                        trade_id: Optional[int] = None,
                         sl_percent: Optional[float] = None,
-                        tp_percent: Optional[float] = None) -> Position:
+                        tp_percent: Optional[float] = None,
+                        market_type: str = 'spot') -> Optional[int]:
         """Create a new position after BUY execution"""
         sl_pct = sl_percent or self.default_sl_pct
         tp_pct = tp_percent or self.default_tp_pct
@@ -134,11 +101,22 @@ class ExecutionAgent(BaseAgent):
         stop_loss = entry_price * (1 - sl_pct / 100)
         take_profit = entry_price * (1 + tp_pct / 100)
         
+        # Validate quantity — reject zero/negative
+        if quantity <= 0:
+            self.log('warning', f"Skipping position create: {symbol} qty={quantity} <= 0")
+            return None
+
+        # Validate cost
+        if cost_usdt <= 0:
+            self.log('warning', f"Skipping position create: {symbol} cost={cost_usdt} <= 0")
+            return None
+
         with self.db.get_session() as session:
             position = Position(
-                symbol=symbol,
-                exchange=exchange,
+                symbol=symbol.upper(),
+                exchange=exchange.upper(),
                 side='LONG',
+                market_type=market_type,
                 entry_price=Decimal(str(entry_price)),
                 quantity=Decimal(str(quantity)),
                 cost_usdt=Decimal(str(cost_usdt)),
@@ -290,15 +268,13 @@ class ExecutionAgent(BaseAgent):
             
             elif exchange == 'bybit':
                 data = ex.get_wallet_balance('UNIFIED')
-                account = data['result']['list'][0]
-                total_avail = float(account.get('totalAvailableBalance') or 0)
-                total_equity = float(account.get('totalEquity') or 0)
-                balances = account['coin']
+                # Response: result.list = [{account_info_with 'coin': [coins]}]
+                account_coins = data['result']['list'][0]['coin']
                 return {'exchange': exchange, 'balances': [
-                    {'asset': b['coin'], 'free': float(b.get('availableToWithdraw') or 0) if b.get('availableToWithdraw', '') != '' else float(b.get('walletBalance', 0)),
-                     'total': float(b.get('walletBalance') or 0),
-                     'available': total_avail if b['coin'] == 'USDT' else float(b.get('availableToWithdraw') or 0)}
-                    for b in balances if float(b.get('walletBalance', 0) or 0) > 0
+                    {'asset': b['coin'],
+                     'free': float(b['availableToWithdraw']) if b.get('availableToWithdraw') else float(b.get('walletBalance') or 0),
+                     'total': float(b.get('walletBalance') or 0)}
+                    for b in account_coins if float(b.get('walletBalance') or 0) > 0
                 ]}
             
             elif exchange == 'bitfinex':
@@ -316,112 +292,11 @@ class ExecutionAgent(BaseAgent):
     def get_usdt_balance(self, exchange: str = 'binance') -> float:
         """Get USDT balance for trading"""
         balance = self.get_balance(exchange)
-        if 'error' in balance:
-            return 0.0
         for b in balance.get('balances', []):
             if b['asset'] == 'USDT':
-                return b.get('available', b.get('free', 0))
+                return b['free']
         return 0.0
-
-    def cleanup_stale_orders(self, exchange: str = 'bybit', max_age_hours: int = 24) -> Dict:
-        """Cancel all open orders older than max_age_hours (stale cleanup)"""
-        result = {'cancelled': 0, 'errors': 0, 'details': []}
-        ex = self.exchanges.get(exchange)
-        if not ex:
-            return {'error': f'Unknown exchange: {exchange}'}
-
-        try:
-            open_orders = ex.get_open_orders(category='spot')
-            if open_orders.get('retCode') != 0:
-                return {'error': open_orders.get('retMsg', 'Unknown error')}
-
-            orders = open_orders.get('result', {}).get('list', [])
-            if not orders:
-                return result
-
-            self.log('info', f"Found {len(orders)} open orders on {exchange}")
-
-            # Cancel all open orders (aggressive cleanup)
-            if exchange == 'bybit':
-                # Cancel by settleCoin to clear all USDT orders
-                cancel_result = ex.cancel_all_orders(category='spot')
-                if cancel_result.get('retCode') == 0:
-                    cancelled_list = cancel_result.get('result', {}).get('list', [])
-                    result['cancelled'] = len(cancelled_list)
-                    for o in cancelled_list:
-                        result['details'].append(f"Cancelled orderId={o.get('orderId')}")
-                    self.log('info', f"Cleaned up {result['cancelled']} stale orders on {exchange}")
-                else:
-                    result['errors'] = 1
-                    self.log('error', f"Failed to cancel orders: {cancel_result}")
-            else:
-                # Per-symbol cancellation for other exchanges
-                symbols = set(o.get('symbol') for o in orders)
-                for symbol in symbols:
-                    cancel_r = ex.cancel_all_orders(category='spot', symbol=symbol)
-                    if cancel_r.get('retCode') == 0:
-                        result['cancelled'] += len(cancel_r.get('result', {}).get('list', []))
-                    else:
-                        result['errors'] += 1
-
-        except Exception as e:
-            self.log('error', f"cleanup_stale_orders failed: {e}")
-            result['errors'] += 1
-
-        return result
-
-    def _round_bybit_qty(self, symbol: str, quote_amount: str, exchange: str = 'bybit') -> str:
-        """
-        Round quantity to Bybit step size for spot market buy.
-        Fetches instrument info and rounds to the nearest qty step.
-        """
-        try:
-            ex = self.exchanges.get(exchange)
-            if not ex:
-                return quote_amount
-            
-            info = ex.get_instruments_info(category='spot', symbol=symbol)
-            if info.get('retCode') != 0:
-                self.log('warning', f"get_instruments_info failed: {info.get('retMsg')}")
-                return quote_amount
-            
-            result = info.get('result', {})
-            if not result or 'list' not in result or not result['list']:
-                return quote_amount
-            
-            lot_filter = result['list'][0].get('lotSizeFilter', {})
-            step = float(lot_filter.get('basePrecision', lot_filter.get('qtyStep', '1')))
-            
-            # Calculate qty from quote amount and current price
-            ticker = ex.get_ticker(symbol)
-            price = float(ticker.get('lastPrice', 0))
-            if price <= 0:
-                return quote_amount
-            
-            base_qty = float(quote_amount) / price
-            rounded = round(base_qty / step) * step
-            
-            # Ensure at least 1 step
-            if rounded < step:
-                rounded = step
-            
-            # Ensure quote value meets Bybit minimum ($5 for spot)
-            lot_filter = result['list'][0].get('lotSizeFilter', {})
-            min_order_amt = float(lot_filter.get('minOrderAmt', 5))
-            min_qty_for_min_amt = min_order_amt / price
-            if rounded * price < min_order_amt:
-                # Round up to meet minimum
-                rounded = round(min_qty_for_min_amt / step) * step
-                if rounded * price < min_order_amt:
-                    rounded += step
-            
-            qty_str = str(rounded)
-            self.log('debug', f"_round_bybit_qty: {symbol} quote={quote_amount} price={price} → qty={qty_str} (step={step})")
-            return qty_str
-        except Exception as e:
-            self.log('warning', f"_round_bybit_qty failed: {e}")
-            return quote_amount
-
+    
     # ==================== Order Execution ====================
     
     def execute_spot_buy(self, symbol: str, quote_amount: str, 
@@ -445,11 +320,9 @@ class ExecutionAgent(BaseAgent):
                 }
             
             elif exchange == 'bybit':
-                # Round qty to Bybit step size
-                qty = self._round_bybit_qty(symbol, quote_amount, exchange='bybit')
-                result = ex.create_spot_buy(symbol, qty)
+                result = ex.create_spot_buy(symbol, quote_amount)
                 order_id = result['result'].get('orderId')
-                self.log('info', f"Bybit BUY {symbol}: {quote_amount} USDT → qty={qty} → orderId={order_id}")
+                self.log('info', f"Bybit BUY {symbol}: {quote_amount} USDT → orderId={order_id}")
                 return {
                     'exchange': exchange,
                     'symbol': symbol,
@@ -526,17 +399,32 @@ class ExecutionAgent(BaseAgent):
     
     # ==================== Database Operations ====================
     
-    def save_trade_to_db(self, signal_id: Optional[int], result: Dict) -> int:
+    def save_trade_to_db(self, signal_id: Optional[int], result: Dict, position_id: Optional[int] = None) -> int:
         """Save executed trade to database and return trade_id"""
+        # Calculate PnL if we have entry and close prices
+        pnl_abs = 0.0
+        pnl_pct = 0.0
+        if result.get('price') and result.get('entry_price'):
+            entry = float(result['entry_price'])
+            close = float(result['price'])
+            qty = float(result.get('executed_qty', 0) or result.get('quantity', 0))
+            pnl_abs = (close - entry) * qty
+            pnl_pct = ((close - entry) / entry) * 100 if entry > 0 else 0.0
+
         with self.db.get_session() as session:
             trade = Trade(
                 signal_id=signal_id,
-                exchange=result.get('exchange', 'unknown'),
-                symbol=result.get('symbol', ''),
-                side=result.get('side', ''),
+                exchange=result.get('exchange', 'unknown').upper(),
+                symbol=result.get('symbol', '').upper(),
+                side=result.get('side', '').upper(),
                 order_type='MARKET',
-                quantity=float(result.get('executed_qty', 0)),
+                quantity=float(result.get('executed_qty', 0) or 0),
                 price=float(result.get('price', 0)) if result.get('price') else None,
+                fee=0,
+                pnl_percent=Decimal(str(round(pnl_pct, 4))),
+                pnl_absolute=Decimal(str(round(pnl_abs, 4))),
+                stop_loss=Decimal(str(result['stop_loss'])) if result.get('stop_loss') else None,
+                take_profit=Decimal(str(result['take_profit'])) if result.get('take_profit') else None,
                 order_id=result.get('order_id'),
                 created_at=datetime.utcnow(),
             )
@@ -545,10 +433,10 @@ class ExecutionAgent(BaseAgent):
             trade_id = trade.id
             
             if signal_id:
-                signal = session.query(Signal).filter_by(id=signal_id).first()
-                if signal:
-                    signal.status = 'EXECUTED'
-                    signal.executed_at = datetime.utcnow()
+                sig = session.query(StrategySignal).filter_by(id=signal_id).first()
+                if sig:
+                    sig.status = 'executed'
+                    sig.executed_at = datetime.utcnow()
         
         return trade_id
     
@@ -565,73 +453,168 @@ class ExecutionAgent(BaseAgent):
     
     # ==================== Main Run Loop ====================
     
-    def run_once(self) -> Dict[str, Any]:
+    def run_once(self, market_type: str = 'linear') -> Dict[str, Any]:
         """Execute pending signals and manage open positions"""
-        self.log('info', "Starting execution cycle...")
-        
+        self.log('info', f"Starting execution cycle ({market_type})...")
+
         results = {
             'timestamp': datetime.utcnow().isoformat(),
             'buys_executed': 0,
             'sells_executed': 0,
             'sl_tp_triggered': 0,
+            'signals_cleaned': 0,
+            'trailing_updated': 0,
             'errors': 0,
             'details': [],
         }
-        
-        # 1. Check SL/TP for open positions
+
+        # 0. Clean expired signals (TTL by strategy)
+        clean_result = self._clean_expired_signals()
+        results['signals_cleaned'] = clean_result['count']
+        results['details'].extend(clean_result['details'])
+
+        # 1. Check SL/TP for open positions and update trailing
         sl_tp_result = self._check_and_execute_sl_tp()
         results['sl_tp_triggered'] = sl_tp_result['triggered']
+        results['trailing_updated'] = sl_tp_result.get('trailing_updated', 0)
         results['details'].extend(sl_tp_result['details'])
-        
+
         # 2. Execute pending BUY signals
         buy_result = self._execute_pending_buys()
         results['buys_executed'] = buy_result['executed']
         results['errors'] += buy_result['errors']
         results['details'].extend(buy_result['details'])
-        
+
         # 3. Execute pending SELL signals
         sell_result = self._execute_pending_sells()
         results['sells_executed'] = sell_result['executed']
         results['errors'] += sell_result['errors']
         results['details'].extend(sell_result['details'])
-        
+
         self.log('info', f"Execution complete: {results['buys_executed']} buys, "
-                  f"{results['sells_executed']} sells, {results['sl_tp_triggered']} SL/TP triggers")
-        
+                  f"{results['sells_executed']} sells, {results['sl_tp_triggered']} SL/TP, "
+                  f"{results['signals_cleaned']} cleaned")
+
         return results
     
-    def _check_and_execute_sl_tp(self) -> Dict:
-        """Check and execute SL/TP for all open positions"""
-        triggered = 0
+    def _clean_expired_signals(self) -> Dict:
+        """Delete pending signals that exceeded their TTL (by strategy)."""
+        from datetime import timedelta
+        # TTL by strategy (in minutes)
+        ttl_by_strategy = {
+            'scalping': 15,
+            'intraday': 60,
+            'position': 240,
+        }
+        cleaned = 0
         details = []
-        
+
+        with self.db.get_session() as session:
+            for strategy, ttl_min in ttl_by_strategy.items():
+                cutoff = datetime.utcnow() - timedelta(minutes=ttl_min)
+                deleted = session.query(StrategySignal).filter(
+                    StrategySignal.strategy == strategy,
+                    StrategySignal.status == 'pending',
+                    StrategySignal.created_at < cutoff,
+                ).delete()
+                if deleted > 0:
+                    cleaned += deleted
+                    details.append(f"{strategy}: {deleted} expired")
+
+            session.commit()
+
+        return {'count': cleaned, 'details': details}
+
+    def _check_and_execute_sl_tp(self) -> Dict:
+        """Check and execute SL/TP for all open positions.
+        Also updates trailing stop on Bybit if price moved favorably."""
+        triggered = 0
+        trailing_updated = 0
+        details = []
+
         open_positions = self.get_all_open_positions()
-        
+
         for pos in open_positions:
             try:
                 # Get current price from exchange
                 exchange = pos['exchange']
                 symbol = pos['symbol']
                 ex = self.exchanges.get(exchange)
-                
+
                 if not ex:
                     continue
-                
+
                 ticker = ex.get_ticker(symbol)
                 current_price = float(ticker.get('lastPrice', 0))
-                
+
                 if current_price <= 0:
                     continue
-                
-                # Update position prices and check triggers
+
+                # Update position prices (also updates local trailing state)
                 self.update_position_prices(symbol, current_price)
                 triggers = self.check_stop_loss_take_profit(symbol, current_price)
-                
+
+                # === Trailing stop update on Bybit ===
+                if pos['market_type'] == 'linear' and self.trailing_stop_enabled:
+                    try:
+                        entry_price = float(pos.get('entry_price', 0))
+                        if entry_price > 0:
+                            pnl_pct = (current_price - entry_price) / entry_price * 100
+                            pos_obj = None
+                            # Get the position object to check trailing state
+                            with self.db.get_session() as sess:
+                                from src.core.database import Position
+                                db_pos = sess.query(Position).filter_by(
+                                    symbol=symbol, status='OPEN'
+                                ).first()
+                                if db_pos:
+                                    trailing_activated = db_pos.trailing_stop_activated
+                                    trailing_dist = self.trailing_distance_pct
+                                    trailing_activation = self.trailing_activation_pct
+
+                                    if not trailing_activated and pnl_pct >= trailing_activation:
+                                        # Activate trailing: set new SL closer to price
+                                        new_sl = round(current_price * (1 - trailing_dist / 100), 4)
+                                        ts_result = ex.set_position_sl(
+                                            symbol=symbol,
+                                            stop_loss=str(new_sl),
+                                            trailing_active=True,
+                                            trailing_distance=str(trailing_dist),
+                                        )
+                                        if ts_result.get('retCode') == 0:
+                                            db_pos.trailing_stop_activated = True
+                                            db_pos.trailing_stop_price = Decimal(str(new_sl))
+                                            sess.commit()
+                                            self.log('info', f"Trailing ACTIVATED for {symbol} @ ${new_sl:.4f} (pnl={pnl_pct:.2f}%)")
+                                            trailing_updated += 1
+
+                                    elif trailing_activated:
+                                        # Move trailing SL up if price moved up
+                                        current_trailing_sl = float(db_pos.trailing_stop_price or 0)
+                                        new_trailing_sl = round(current_price * (1 - trailing_dist / 100), 4)
+                                        if new_trailing_sl > current_trailing_sl:
+                                            ts_result = ex.set_position_sl(
+                                                symbol=symbol,
+                                                stop_loss=str(new_trailing_sl),
+                                                trailing_active=True,
+                                                trailing_distance=str(trailing_dist),
+                                            )
+                                            if ts_result.get('retCode') == 0:
+                                                db_pos.trailing_stop_price = Decimal(str(new_trailing_sl))
+                                                sess.commit()
+                                                self.log('info', f"Trailing MOVED for {symbol}: ${current_trailing_sl:.4f} → ${new_trailing_sl:.4f}")
+                                                trailing_updated += 1
+                    except Exception as ts_err:
+                        self.log('warning', f"Trailing update error for {symbol}: {ts_err}")
+
+                # === Execute triggered SL/TP ===
                 for trigger in triggers:
-                    # Execute the sell
-                    qty = str(pos['quantity'])
-                    result = self.execute_spot_sell(symbol, qty, exchange)
-                    
+                    qty = float(pos['quantity'])
+                    if pos['market_type'] == 'linear':
+                        result = self.execute_linear_sell(symbol, qty, exchange)
+                    else:
+                        result = self.execute_spot_sell(symbol, str(qty), exchange)
+
                     if 'error' not in result:
                         close_reason = trigger['type']
                         close_result = self.close_position(
@@ -645,150 +628,344 @@ class ExecutionAgent(BaseAgent):
                             'pnl': close_result.get('pnl_absolute', 0),
                             'pnl_pct': close_result.get('pnl_percent', 0),
                         })
-                        
-                        # Save trade
+
                         trade_result = self.save_trade_to_db(None, {
                             **result,
                             'price': current_price,
+                            'entry_price': float(pos['entry_price']),
                         })
-                        
+
                         self.log('info', f"{close_reason} triggered for {symbol} @ ${current_price:.4f}")
-            
+
             except Exception as e:
-                self.log('error', f"SL/TP check failed for {pos.get('symbol', '?')}: {e}")
-        
-        return {'triggered': triggered, 'details': details}
+                self.log('error', f"SL/TP check failed for {pos['symbol']}: {e}")
+
+        return {'triggered': triggered, 'trailing_updated': trailing_updated, 'details': details}
     
     def _execute_pending_buys(self) -> Dict:
-        """Execute pending BUY signals"""
+        """Execute pending BUY signals from strategy_signals"""
         executed = 0
         errors = 0
         details = []
-        
+
+        # Track which symbols we've already opened this cycle
+        opened_this_cycle = set()
+
         with self.db.get_session() as session:
-            pending_buys = session.query(Signal).filter_by(
-                signal_type='BUY', status='PENDING'
-            ).order_by(Signal.created_at.desc()).limit(5).all()
-        
-        for signal in pending_buys:
+            # No limit — process all pending signals, dedupe by symbol
+            pending_buys_raw = session.query(StrategySignal).filter_by(
+                action='BUY', status='pending'
+            ).order_by(StrategySignal.created_at.desc()).all()
+            pending_buys = [
+                {'id': s.id, 'symbol': s.symbol, 'exchange': s.exchange or 'bybit',
+                 'confidence': s.confidence, 'strategy': s.strategy,
+                 'stop_loss': s.stop_loss, 'take_profit': s.take_profit}
+                for s in pending_buys_raw
+            ]
+
+        for sdata in pending_buys:
             try:
-                symbol = signal.symbol
-                exchange = signal.exchange or 'binance'
-                
-                # Check if we already have a position
-                existing = self.get_open_position(symbol, exchange)
-                if existing:
-                    self.log('info', f"Skipping BUY for {symbol} — already have open position")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+                symbol = sdata['symbol']
+                exchange = sdata['exchange']
+                signal_id = sdata['id']
+
+                # Skip if we already opened this symbol this cycle
+                if symbol in opened_this_cycle:
+                    self._update_strategy_signal_status(signal_id, 'skipped')
                     continue
-                
-                # Calculate position size based on signal confidence
-                signal_confidence = float(signal.confidence or 0.35)
-                amount = self.calculate_position_size(signal_confidence, exchange)
-                
-                if amount < 10:  # Minimum $10
-                    self.log('warning', f"Insufficient balance for {symbol}: ${amount:.2f}")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+
+                # Check Bybit directly for open positions (not DB — may be stale)
+                # Count how many open positions we have for this symbol
+                max_per_symbol = getattr(self.config.risk, 'max_positions_per_symbol', 1)
+                ex = self.exchanges.get(exchange)
+                open_count = 0
+                if ex and exchange == 'bybit':
+                    try:
+                        pos_resp = ex.get_positions(category='linear', symbol=symbol)
+                        pos_list = pos_resp.get('result', {}).get('list', [])
+                        open_count = sum(1 for p in pos_list if float(p.get('size', 0)) > 0)
+                    except Exception:
+                        open_count = 0
+                else:
+                    open_count = 1 if self.get_open_position(symbol, exchange) else 0
+
+                if open_count >= max_per_symbol:
+                    self.log('info', f"Skipping BUY {symbol} — {open_count} open position(s) on {exchange} (max={max_per_symbol})")
+                    self._update_strategy_signal_status(signal_id, 'skipped')
                     continue
-                
-                # Execute buy
+
+                usdt_balance = self.get_usdt_balance(exchange)
+                amount = usdt_balance  # 100% balance, leverage calculated in execute_linear_buy
+
+                if amount < 5:
+                    self.log('warning', f"Balance too small: ${amount:.2f}")
+                    self._update_strategy_signal_status(signal_id, 'skipped')
+                    continue
+
                 amount_str = str(round(amount, 2))
-                result = self.execute_spot_buy(symbol, amount_str, exchange)
+
+                # Extract SL/TP from signal if available
+                sl_pct = None
+                tp_pct = None
+                if sdata.get('stop_loss') and sdata.get('entry_price'):
+                    try:
+                        entry = float(sdata['entry_price'])
+                        sl = float(sdata['stop_loss'])
+                        if entry > 0:
+                            sl_pct = abs((sl - entry) / entry) * 100
+                    except (TypeError, ValueError):
+                        pass
+                if sdata.get('take_profit') and sdata.get('entry_price'):
+                    try:
+                        entry = float(sdata['entry_price'])
+                        tp = float(sdata['take_profit'])
+                        if entry > 0:
+                            tp_pct = abs((tp - entry) / entry) * 100
+                    except (TypeError, ValueError):
+                        pass
+
+                result = self.execute_linear_buy(symbol, amount_str, exchange, sl_pct, tp_pct)
 
                 if 'error' in result:
                     errors += 1
-                    self.log('error', f"BUY failed for {symbol}: {result['error']}")
-                    self.update_signal_status(signal.id, 'FAILED')
+                    self.log('error', f"BUY failed {symbol}: {result['error']}")
+                    self._update_strategy_signal_status(signal_id, 'failed')
                     continue
 
-                # Save trade
-                trade_id = self.save_trade_to_db(signal.id, result)
-
-                # Get entry price
-                executed_qty = float(result.get('executed_qty', 0))
+                executed_qty = float(result.get('executed_qty', 0) or 0)
                 cost = float(result.get('cummulative_quote_qty', amount))
                 entry_price = cost / executed_qty if executed_qty > 0 else 0
 
-                # Create position with SL/TP
-                self.create_position(
+                # Skip if quantity is zero
+                if executed_qty <= 0:
+                    self.log('warning', f"Executed qty=0 for {symbol} — skipping position")
+                    self._update_strategy_signal_status(signal_id, 'skipped')
+                    errors += 1
+                    continue
+
+                # Save trade AFTER we have entry_price and executed_qty
+                result['entry_price'] = entry_price
+                result['stop_loss'] = sdata.get('stop_loss')
+                result['take_profit'] = sdata.get('take_profit')
+                trade_id = self.save_trade_to_db(signal_id, result)
+
+                position_id = self.create_position(
                     symbol=symbol,
                     exchange=exchange,
+                    market_type='linear',
                     entry_price=entry_price,
                     quantity=executed_qty,
                     cost_usdt=cost,
-                    signal_id=signal.id,
+                    signal_id=signal_id,
                     trade_id=trade_id,
                 )
 
+                if position_id is None:
+                    self.log('warning', f"Position create returned None for {symbol} — skipping")
+                    self._update_strategy_signal_status(signal_id, 'skipped')
+                    errors += 1
+                    continue
+
+                # Mark as executed
+                self._update_strategy_signal_status(signal_id, 'executed')
+                opened_this_cycle.add(symbol)
                 executed += 1
-                self.log('info', f"BUY {symbol} | conf={signal_confidence:.0%} | ${amount:.2f} ({amount/self.get_usdt_balance(exchange)*100:.1f}% balance)")
                 details.append({
                     'type': 'BUY',
                     'symbol': symbol,
                     'price': entry_price,
                     'quantity': executed_qty,
                     'cost': cost,
-                    'confidence': signal_confidence,
+                    'strategy': sdata.get('strategy', 'scalping'),
                 })
-            
+
             except Exception as e:
                 errors += 1
-                self.log('error', f"Execution failed for signal {signal.id}: {e}")
-        
+                self.log('error', f"Execution failed signal {signal_id}: {e}")
+
         return {'executed': executed, 'errors': errors, 'details': details}
-    
+
+    def _update_strategy_signal_status(self, signal_id: int, status: str):
+        try:
+            with self.db.get_session() as session:
+                sig = session.query(StrategySignal).get(signal_id)
+                if sig:
+                    sig.status = status
+                    session.commit()
+        except Exception as e:
+            self.log('error', f"Failed update signal {signal_id}: {e}")
+
+    def execute_linear_buy(self, symbol: str, amount: str, exchange: str,
+                           sl_pct: float = None, tp_pct: float = None) -> Dict:
+        try:
+            ex = self.exchanges.get(exchange)
+            if not ex:
+                return {'error': f'No exchange: {exchange}'}
+            ticker = ex.get_ticker(symbol)
+            current_price = float(ticker.get('lastPrice', 0))
+            if current_price <= 0:
+                return {'error': 'No price'}
+            amount_usdt = float(amount)
+
+            # Step 1: Calculate min leverage needed for min notional $5
+            min_leverage = max(5.0 / amount_usdt, 1)
+            leverage = int(min_leverage)
+
+            # Step 2: Calculate qty with that leverage, round to lot size step (0.01)
+            pos_value = amount_usdt * leverage
+            qty = pos_value / current_price
+            qty = round(qty / 0.01) * 0.01  # Round to qtyStep=0.01
+
+            if qty < 0.01:
+                return {'error': f'Qty {qty:.4f} below min 0.01'}
+
+            # Step 2b: Calculate SL/TP prices
+            if sl_pct is None:
+                sl_pct = self.default_sl_pct
+            if tp_pct is None:
+                tp_pct = self.default_tp_pct
+
+            stop_loss = str(round(current_price * (1 - sl_pct / 100), 4))
+            take_profit = str(round(current_price * (1 + tp_pct / 100), 4))
+
+            # Step 3: Open position WITH SL/TP on Bybit
+            result = ex.create_linear_order(
+                symbol=symbol, side='Buy', order_type='Market', qty=str(qty),
+                leverage=str(leverage),
+                stop_loss=stop_loss, take_profit=take_profit,
+            )
+
+            if 'error' in result:
+                return result
+
+            # Step 4: If trailing enabled, set trailing stop via Bybit set-trading-stop
+            if self.trailing_stop_enabled:
+                try:
+                    import time; time.sleep(0.3)
+                    trailing_dist = str(round(self.trailing_distance_pct, 2))
+                    ts_result = ex.set_position_sl(
+                        symbol=symbol,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        trailing_active=True,
+                        trailing_distance=trailing_dist,
+                    )
+                    if ts_result.get('retCode') == 0:
+                        self.log('info', f"Trailing stop set for {symbol}: dist={trailing_dist}%")
+                    else:
+                        self.log('warning', f"Trailing set failed: {ts_result}")
+                except Exception as ts_err:
+                    self.log('warning', f"Trailing stop error: {ts_err}")
+
+            # Step 5: Fetch position to get actual filled qty and entry price
+            try:
+                import time; time.sleep(0.5)
+                pos_resp = ex.get_positions(category='linear', symbol=symbol)
+                pos_list = pos_resp.get('result', {}).get('list', [])
+                for pos in pos_list:
+                    if float(pos.get('size', 0)) > 0:
+                        result['executed_qty'] = float(pos['size'])
+                        result['avgPrice'] = float(pos.get('avgPrice') or current_price)
+                        result['cummulative_quote_qty'] = result['executed_qty'] * result['avgPrice']
+                        break
+            except Exception:
+                pass
+
+            return result
+        except Exception as e:
+            return {'error': str(e)}
+
+    def execute_linear_sell(self, symbol: str, quantity: float, exchange: str = 'bybit') -> Dict:
+        """Execute linear futures market sell (close long position)"""
+        try:
+            ex = self.exchanges.get(exchange)
+            if not ex:
+                return {'error': f'No exchange: {exchange}'}
+            result = ex.create_linear_order(
+                symbol=symbol, side='Sell', order_type='Market', qty=str(quantity)
+            )
+
+            if 'error' in result:
+                return result
+
+            # Fetch position to get filled qty
+            try:
+                import time; time.sleep(0.5)
+                pos_resp = ex.get_positions(category='linear', symbol=symbol)
+                pos_list = pos_resp.get('result', {}).get('list', [])
+                for pos in pos_list:
+                    if float(pos.get('size', 0)) > 0:
+                        result['executed_qty'] = float(pos['size'])
+                        result['avgPrice'] = float(pos.get('avgPrice') or 0)
+                        result['cummulative_quote_qty'] = result['executed_qty'] * result['avgPrice']
+                        break
+            except Exception:
+                pass
+
+            return result
+        except Exception as e:
+            return {'error': str(e)}
+
     def _execute_pending_sells(self) -> Dict:
-        """Execute pending SELL signals"""
+        """Execute pending SELL signals from strategy_signals"""
         executed = 0
         errors = 0
         details = []
-        
+
+        # Extract data while session is open to avoid DetachedInstanceError
         with self.db.get_session() as session:
-            pending_sells = session.query(Signal).filter_by(
-                signal_type='SELL', status='PENDING'
-            ).order_by(Signal.created_at.desc()).limit(5).all()
-        
-        for signal in pending_sells:
+            pending_sells_raw = session.query(StrategySignal).filter_by(
+                action='SELL', status='pending'
+            ).order_by(StrategySignal.created_at.desc()).limit(5).all()
+            pending_sells = [
+                {'id': s.id, 'symbol': s.symbol, 'exchange': s.exchange or 'bybit'}
+                for s in pending_sells_raw
+            ]
+
+        for sdata in pending_sells:
             try:
-                symbol = signal.symbol
-                exchange = signal.exchange or 'binance'
-                
+                symbol = sdata['symbol']
+                exchange = sdata['exchange']
+                signal_id = sdata['id']
+
                 # Find open position
                 position = self.get_open_position(symbol, exchange)
                 if not position:
                     self.log('info', f"Skipping SELL for {symbol} — no open position")
-                    self.update_signal_status(signal.id, 'SKIPPED')
+                    self._update_strategy_signal_status(signal_id, 'skipped')
                     continue
-                
+
                 # Get current price
                 ex = self.exchanges.get(exchange)
                 ticker = ex.get_ticker(symbol)
                 current_price = float(ticker.get('lastPrice', 0))
-                
-                # Execute sell
-                qty = str(float(position.quantity))
-                result = self.execute_spot_sell(symbol, qty, exchange)
-                
+
+                # Execute sell — use linear sell for futures
+                qty = float(position.quantity)
+                if position.market_type == 'linear':
+                    result = self.execute_linear_sell(symbol, qty, exchange)
+                else:
+                    result = self.execute_spot_sell(symbol, str(qty), exchange)
+
                 if 'error' in result:
                     errors += 1
                     self.log('error', f"SELL failed for {symbol}: {result['error']}")
-                    self.update_signal_status(signal.id, 'FAILED')
+                    self._update_strategy_signal_status(signal_id, 'failed')
                     continue
-                
+
                 # Close position
                 close_result = self.close_position(
                     position.id, current_price, 'SIGNAL'
                 )
-                
+
                 # Save trade
-                self.save_trade_to_db(signal.id, {
+                self.save_trade_to_db(signal_id, {
                     **result,
                     'price': current_price,
                 })
-                
-                self.update_signal_status(signal.id, 'EXECUTED', 
-                                          close_result.get('pnl_percent'))
-                
+
+                self._update_strategy_signal_status(signal_id, 'executed')
+
                 executed += 1
                 details.append({
                     'type': 'SELL',
@@ -798,11 +975,11 @@ class ExecutionAgent(BaseAgent):
                     'pnl': close_result.get('pnl_absolute', 0),
                     'pnl_pct': close_result.get('pnl_percent', 0),
                 })
-            
+
             except Exception as e:
                 errors += 1
-                self.log('error', f"SELL execution failed for signal {signal.id}: {e}")
-        
+                self.log('error', f"SELL execution failed for signal {signal_id}: {e}")
+
         return {'executed': executed, 'errors': errors, 'details': details}
     
     def generate_confirmation_card(self, operation: Dict) -> str:

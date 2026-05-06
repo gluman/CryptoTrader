@@ -87,7 +87,7 @@ def main():
             logger.info(f"Full cycle result: {result}")
     
     elif args.task == 'execute':
-        result = executor.run_once()
+        result = executor.run_once(market_type='linear')
         logger.info(f"Execution result: {result}")
     
     elif args.task == 'all':
@@ -111,7 +111,7 @@ def main():
         
         # 4. Execute pending signals
         logger.info("Step 4: Executing signals...")
-        exec_result = executor.run_once()
+        exec_result = executor.run_once(market_type='linear')
         logger.info(f"Executed: {exec_result}")
         
         # 5. Send summary

@@ -1,11 +1,12 @@
 """
-Multi-Agent Decision Engine — 6 блоков:
-1. TechnicalAnalysis   (вес 0.25) — RSI, MACD, BB, SMA, CSS
-2. FundamentalAnalysis (вес 0.15) — долгосрочные факторы
-3. PatternRecognition  (вес 0.20) — свечные паттерны
-4. NewsAnalysis        (вес 0.15) — новостной фон
+Multi-Agent Decision Engine — 7 блоков:
+1. TechnicalAnalysis   (вес 0.20) — RSI, MACD, BB, SMA, CSS
+2. FundamentalAnalysis (вес 0.10) — долгосрочные факторы
+3. PatternRecognition  (вес 0.15) — свечные паттерны
+4. NewsAnalysis        (вес 0.10) — новостной фон
 5. MarketSentiment     (вес  0.10) — настроения рынка
-6. PumpHunter          (вес 0.15) — стратегия Pump Hunter
+6. PumpHunter          (вес 0.10) — стратегия Pump Hunter
+7. OBStructure         (вес 0.25) — Order Blocks + Break of Structure (Smart Money)
 
 Каждый блок возвращает: {score: 0.0-1.0, signal: BUY/SELL/HOLD, reasoning: str}
 Aggregator: weighted sum → final decision
@@ -20,6 +21,7 @@ from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
 from sqlalchemy import text, func
+from ..data.indicators import analyze_ob_structure
 
 
 # === Block 1: Technical Analysis ===
@@ -600,19 +602,110 @@ class PumpHunterAgent:
         }
 
 
+# === Block 7: Order Blocks + Break of Structure (Smart Money) ===
+
+class OBStructureAgent:
+    """Блок 7: Order Blocks + Break of Structure — Smart Money подход.
+    
+    Стратегия основана на MQL5 статье "Inducement Mitigation Block":
+    - Order Blocks: зоны где институционалы накапливают позиции
+    - Break of Structure: пробой структурных уровней
+    - Inducement: провокационные ложные движения для сбора стопов
+    - Fair Value Gaps: гэпы в импульсе как конфлюэнс
+    - Mitigation tracking: избегать глубоко замиттированных OB
+    """
+    
+    def __init__(self, config: Config, logger: logging.Logger):
+        self.log = logger
+        self.config = config
+    
+    def analyze(self, df: pd.DataFrame, symbol: str = None) -> Dict[str, Any]:
+        if df.empty or len(df) < 60:
+            return {
+                'score': 0.5, 'signal': 'HOLD',
+                'reasoning': 'Insufficient data for OB analysis',
+                'block': 'ob_structure'
+            }
+        
+        try:
+            # Use the master OB analysis function
+            ob_result = analyze_ob_structure(df, lookback=50)
+            
+            signal = ob_result.get('signal', 'HOLD')
+            confidence = ob_result.get('confidence', 0.5)
+            reasoning = ob_result.get('reasoning', '')
+            
+            # Map signal to score (0=SELL, 0.5=HOLD, 1=BUY)
+            if signal == 'BUY':
+                score = 0.5 + (confidence * 0.5)
+            elif signal == 'SELL':
+                score = 0.5 - (confidence * 0.5)
+            else:
+                score = 0.5
+            
+            # Add OB details to reasoning
+            bos = ob_result.get('bos', {})
+            bull_obs = ob_result.get('bullish_obs', [])
+            bear_obs = ob_result.get('bearish_obs', [])
+            nearest_round = ob_result.get('nearest_round', {})
+            
+            extra_info = []
+            if bull_obs:
+                extra_info.append(f"bullish_OBs={len(bull_obs)}")
+            if bear_obs:
+                extra_info.append(f"bearish_OBs={len(bear_obs)}")
+            if bos.get('has_bullish_bos'):
+                extra_info.append("bullish_BoS")
+            if bos.get('has_bearish_bos'):
+                extra_info.append("bearish_BoS")
+            if nearest_round.get('zerosize', 0) >= 3:
+                extra_info.append(f"round_level_ZS{nearest_round['zerosize']}")
+            
+            if extra_info:
+                reasoning = f"{reasoning} [{', '.join(extra_info)}]"
+            
+            return {
+                'score': round(max(0.0, min(1.0, score)), 4),
+                'signal': signal,
+                'reasoning': reasoning[:200],
+                'block': 'ob_structure',
+                'details': {
+                    'signal': signal,
+                    'confidence': confidence,
+                    'bullish_obs': len(bull_obs),
+                    'bearish_obs': len(bear_obs),
+                    'bullish_bos': bos.get('has_bullish_bos', False),
+                    'bearish_bos': bos.get('has_bearish_bos', False),
+                    'zerosize': nearest_round.get('zerosize', 0),
+                    'nearest_round_dist_pct': nearest_round.get('nearest_round_dist_pct', 0),
+                    'current_price': ob_result.get('current_price', 0),
+                    'atr': ob_result.get('atr', 0),
+                }
+            }
+        
+        except Exception as e:
+            self.log.error(f"OB Structure block error: {e}")
+            return {
+                'score': 0.5, 'signal': 'HOLD',
+                'reasoning': f'OB analysis error: {str(e)[:100]}',
+                'block': 'ob_structure'
+            }
+
+
 # === AGGREGATOR ===
 
 class DecisionAggregator:
-    """Aggregates scores from all 6 blocks into final decision"""
+    """Aggregates scores from all 7 blocks into final decision"""
     
-    # Weights for each block
+    # Weights for each block (7 blocks now)
     WEIGHTS = {
-        'technical': 0.25,
-        'fundamental': 0.15,
-        'pattern': 0.20,
-        'news': 0.15,
+        'technical': 0.20,
+        'fundamental': 0.10,
+        'pattern': 0.15,
+        'news': 0.10,
         'market_sentiment': 0.10,
-        'pump_hunter': 0.15,
+        'pump_hunter': 0.10,
+        'ob_structure': 0.25,   # Smart Money — Order Blocks + BoS
     }
     
     def __init__(self, logger: logging.Logger):
@@ -620,58 +713,79 @@ class DecisionAggregator:
     
     def aggregate(self, results: Dict[str, Dict[str, Any]], min_confidence: float = 0.35) -> Dict[str, Any]:
         """
-        Compute weighted average of all block scores.
-        results: {block_name: {score, signal, reasoning, details}}
+        Bidirectional scoring: each block scores 0.0-1.0
+        - Score > 0.5 = bullish (BUY conviction)
+        - Score < 0.5 = bearish (SELL conviction)
+        - Score = 0.5 = neutral (no conviction)
+
+        final_bullish = Σ(score × weight) / Σ(weights)
+        final_bearish = Σ((1-score) × weight) / Σ(weights)
+
+        Signal logic:
+        - BUY if bullish > 0.5 + threshold AND bullish > bearish
+        - SELL if bearish > 0.5 + threshold AND bearish > bullish
+        - HOLD otherwise
         """
-        weighted_sum = 0.0
-        total_weight = 0.0
-        
-        scores_by_signal = {'BUY': 0.0, 'SELL': 0.0, 'HOLD': 0.0}
-        weights_by_signal = {'BUY': 0.0, 'SELL': 0.0, 'HOLD': 0.0}
-        
-        for block_name, result in results.items():
-            weight = self.WEIGHTS.get(block_name, 0.0)
-            score = result.get('score', 0.5)
-            signal = result.get('signal', 'HOLD')
-            
-            weighted_sum += score * weight
-            total_weight += weight
-            
-            # Track by signal for additional logic
-            scores_by_signal[signal] += score * weight
-            weights_by_signal[signal] += weight
-        
-        # Normalize
-        final_score = weighted_sum / total_weight if total_weight > 0 else 0.5
-        
-        # Override: if weighted score conflicts with majority signal, apply rules
-        if weights_by_signal['BUY'] >= 0.5 and final_score >= 0.55:
+        total_weight = sum(self.WEIGHTS.get(b, 0) for b in results)
+
+        if total_weight == 0:
+            return {
+                'signal': 'HOLD', 'confidence': min_confidence,
+                'score': 0.5, 'reasoning': 'No blocks available',
+                'blocks': results, 'weights': self.WEIGHTS,
+                'bullish': 0.5, 'bearish': 0.5,
+            }
+
+        bullish_score = sum(
+            results[b].get('score', 0.5) * self.WEIGHTS.get(b, 0)
+            for b in results
+        ) / total_weight
+
+        bearish_score = sum(
+            (1 - results[b].get('score', 0.5)) * self.WEIGHTS.get(b, 0)
+            for b in results
+        ) / total_weight
+
+        # Normalize to get net direction (-1 to +1), then map to 0-1
+        # bullish_score > 0.5 → positive side
+        # bearish_score > 0.5 → negative side
+        net_direction = bullish_score - bearish_score  # -1 to +1
+        final_score = (net_direction + 1) / 2  # 0 to 1
+
+        # Asymmetric thresholds — SELL is easier to trigger (market tops are sharp)
+        # BUY: bullish dominates strongly (net > +0.20 → final_score > 0.60)
+        # SELL: bearish competes (net >= -0.24 → final_score <= 0.38)
+        if bullish_score > 0.60 and net_direction > 0.20:
             final_signal = 'BUY'
-        elif weights_by_signal['SELL'] >= 0.5 and final_score <= 0.45:
+            confidence = abs(net_direction) * 2  # 0-1 scale
+        elif bearish_score >= bullish_score and net_direction <= -0.24:
             final_signal = 'SELL'
-        elif final_score >= 0.60:
+            confidence = abs(net_direction) * 2
+        elif final_score > 0.65:
             final_signal = 'BUY'
-        elif final_score <= 0.40:
+            confidence = (final_score - 0.5) * 2
+        elif final_score < 0.35:
             final_signal = 'SELL'
+            confidence = (0.5 - final_score) * 2
         else:
             final_signal = 'HOLD'
-        
-        # Confidence = normalized weighted score distance from 0.5
-        confidence = abs(final_score - 0.5) * 2
-        
-        # If confidence too low, force HOLD
+            confidence = 0.35
+
+        # Force HOLD if confidence too low
         if confidence < min_confidence:
             final_signal = 'HOLD'
             confidence = min_confidence
-        
+
         self.log.info(
-            f"Aggregator: final_score={final_score:.3f}, confidence={confidence:.3f}, "
-            f"signal={final_signal}, blocks={list(results.keys())}"
+            f"Aggregator: bullish={bullish_score:.3f}, bearish={bearish_score:.3f}, "
+            f"signal={final_signal}, confidence={confidence:.3f}"
         )
-        
-        # Build reasoning
-        block_reasons = [f"{r['block']}: {r['signal']}({r['score']:.2f})" for r in results.values()]
-        
+
+        block_reasons = [
+            f"{results[b]['block']}: {results[b]['signal']}({results[b]['score']:.2f})"
+            for b in results
+        ]
+
         return {
             'signal': final_signal,
             'confidence': round(confidence, 4),
@@ -679,6 +793,8 @@ class DecisionAggregator:
             'reasoning': f"Aggregated: {', '.join(block_reasons)}",
             'blocks': results,
             'weights': self.WEIGHTS,
+            'bullish': round(bullish_score, 4),
+            'bearish': round(bearish_score, 4),
         }
 
 
@@ -694,7 +810,7 @@ class MultiAgentDecisionEngine:
         self.log = logger
         self.config = config
         
-        # Initialize all 6 blocks
+        # Initialize all 7 blocks
         self.blocks = {
             'technical': TechnicalAnalysisAgent(config, logger),
             'fundamental': FundamentalAnalysisAgent(config, logger),
@@ -702,6 +818,7 @@ class MultiAgentDecisionEngine:
             'news': NewsAnalysisAgent(config, logger),
             'market_sentiment': MarketSentimentAgent(config, logger),
             'pump_hunter': PumpHunterAgent(config, logger),
+            'ob_structure': OBStructureAgent(config, logger),
         }
         
         self.aggregator = DecisionAggregator(logger)
@@ -759,6 +876,13 @@ class MultiAgentDecisionEngine:
         except Exception as e:
             self.log.error(f"News block error: {e}")
             results['news'] = {'score': 0.5, 'signal': 'HOLD', 'reasoning': str(e), 'block': 'news'}
+        
+        # OB Structure block (Smart Money approach)
+        try:
+            results['ob_structure'] = self.blocks['ob_structure'].analyze(df, symbol)
+        except Exception as e:
+            self.log.error(f"OB Structure block error: {e}")
+            results['ob_structure'] = {'score': 0.5, 'signal': 'HOLD', 'reasoning': str(e), 'block': 'ob_structure'}
         
         # Aggregate
         decision = self.aggregator.aggregate(results, self.min_confidence)

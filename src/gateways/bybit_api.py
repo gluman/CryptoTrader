@@ -216,22 +216,43 @@ class BybitAPI:
                             order_type: str = 'Market', price: Optional[str] = None,
                             stop_loss: Optional[str] = None, take_profit: Optional[str] = None) -> Dict:
         """Create linear perpetual long position"""
-        self.set_leverage(symbol, leverage, leverage)
+        try:
+            self.set_leverage(symbol, leverage, leverage)
+        except BybitAPIError as e:
+            # Ignore "leverage not modified" — already set
+            if 'leverage not modified' not in str(e):
+                raise
         return self.create_order(
             category='linear', symbol=symbol, side='Buy',
             order_type=order_type, qty=qty, price=price,
             position_idx=1, stop_loss=stop_loss, take_profit=take_profit
         )
-    
+
     def create_linear_short(self, symbol: str, qty: str, leverage: str = '1',
                              order_type: str = 'Market', price: Optional[str] = None,
                              stop_loss: Optional[str] = None, take_profit: Optional[str] = None) -> Dict:
         """Create linear perpetual short position"""
-        self.set_leverage(symbol, leverage, leverage)
+        try:
+            self.set_leverage(symbol, leverage, leverage)
+        except BybitAPIError as e:
+            if 'leverage not modified' not in str(e):
+                raise
         return self.create_order(
             category='linear', symbol=symbol, side='Sell',
             order_type=order_type, qty=qty, price=price,
             position_idx=2, stop_loss=stop_loss, take_profit=take_profit
+        )
+
+    def create_linear_order(self, symbol: str, side: str, order_type: str = 'Market',
+                            qty: str = None, leverage: str = '15',
+                            stop_loss: Optional[str] = None, take_profit: Optional[str] = None) -> Dict:
+        """Create linear perpetual order (Buy=long, Sell=short)
+        Uses one-way mode (positionIdx=0)"""
+        # For one-way mode: Buy→side=Buy, Sell→side=Sell, positionIdx=0
+        return self.create_order(
+            category='linear', symbol=symbol, side=side,
+            order_type=order_type, qty=qty, price=None,
+            position_idx=0, stop_loss=stop_loss, take_profit=take_profit
         )
     
     def cancel_order(self, category: str, symbol: str, 
@@ -260,6 +281,11 @@ class BybitAPI:
             params['settleCoin'] = 'USDT'
         return self._make_request('GET', '/v5/order/realtime', params=params)
     
+    def get_order_execution(self, order_id: str, category: str = 'linear') -> Dict:
+        """Get execution list for an order"""
+        params = {'category': category, 'orderId': order_id}
+        return self._make_request('GET', '/v5/order/execution-list', params=params)
+
     def get_order_history(self, category: str = 'spot', symbol: Optional[str] = None,
                           limit: int = 50) -> Dict:
         """Get order history"""
@@ -267,7 +293,7 @@ class BybitAPI:
         if symbol:
             params['symbol'] = symbol
         return self._make_request('GET', '/v5/order/history', params=params)
-    
+
     # ==================== Position (Derivatives) ====================
     
     def get_positions(self, category: str = 'linear', symbol: Optional[str] = None,
@@ -298,7 +324,32 @@ class BybitAPI:
             'tpslMode': tpsl_mode,
         }
         return self._make_request('POST', '/v5/position/set-tpsl-mode', json_data=json_data)
-    
+
+    def set_position_sl(self, symbol: str, stop_loss: str,
+                        take_profit: Optional[str] = None,
+                        trailing_active: bool = False,
+                        trailing_distance: Optional[str] = None) -> Dict:
+        """Set or update SL/TP on open linear position.
+        Bybit V5 /v5/position/set-trading-stop"""
+        json_data = {
+            'category': 'linear',
+            'symbol': symbol,
+            'stopLoss': stop_loss,
+        }
+        if take_profit:
+            json_data['takeProfit'] = take_profit
+        if trailing_active and trailing_distance:
+            json_data['trailingStop'] = trailing_distance
+            json_data['activePriceType'] = 'lastPrice'
+        return self._make_request('POST', '/v5/position/set-trading-stop', json_data=json_data)
+
+    def get_open_positions_with_sl(self, category: str = 'linear', symbol: Optional[str] = None) -> Dict:
+        """Get open positions with their SL/TP details"""
+        params = {'category': category, 'settleCoin': 'USDT'}
+        if symbol:
+            params['symbol'] = symbol
+        return self._make_request('GET', '/v5/position/list', params=params)
+
     # ==================== Utilities ====================
     
     def check_clock_sync(self) -> bool:

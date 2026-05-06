@@ -94,8 +94,8 @@ ollama:
 # PostgreSQL
 # ============================================
 postgresql:
-  host: "192.168.0.149"
-  port: 5432
+  host: "127.0.0.1"
+  port: 5433
   database: "cryptotrader"
   username: "cryptotrader"
   pool_size: 10
@@ -105,9 +105,9 @@ postgresql:
 # RAGFlow
 # ============================================
 ragflow:
-  base_url: "http://192.168.0.186:9380"
-  # Single dataset for all crypto trading data
-  dataset_id: "dcaa90d231d711f199937e8f52fe67f3"
+  base_url: "http://192.168.0.122:9380"
+  api_key: "ragflow-wiOokfEkCTp3eHhPdSJ2lJUUuTn7bM_h_TdHqgPjJQg"
+  dataset_id: "6c97aa7c488a11f1aa57696cdc5c350b"
 
 # ============================================
 # AnythingLLM
@@ -191,22 +191,23 @@ agents:
   trading_decision:
     enabled: true
     event_driven: true
-    min_confidence: 0.35
+    min_confidence: 0.20
   risk:
     enabled: true
     min_position_usd: 5.0
     max_position_usd: 5.0
     min_confidence_for_max_size: 0.8
-    default_stop_loss_percent: 2.0
-    default_take_profit_percent: 4.0
-    risk_reward_ratio: 2.0
+    default_stop_loss_percent: 1.5
+    default_take_profit_percent: 6.0
+    risk_reward_ratio: 4.0
     trailing_stop_enabled: true
-    trailing_stop_activation_percent: 1.5
-    trailing_stop_distance_percent: 1.0
+    trailing_stop_activation_percent: 3.0
+    trailing_stop_distance_percent: 2.0
+    max_positions_per_symbol: 1     # max open positions per symbol (1 = one-way mode)
   executor:
     enabled: true
-    testnet_first: true
-    confirmation_required: true
+    testnet_first: false
+    confirmation_required: false
 
 # ============================================
 # Export Settings

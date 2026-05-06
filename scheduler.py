@@ -27,12 +27,12 @@ class CryptoTraderScheduler:
         self.db = None
         self.agents = {}
         
-        # Schedule intervals (seconds)
+        # Scalping intervals (seconds)
         self.intervals = {
-            'collect': 600,      # 10 minutes
+            'collect': 60,       # 1 minute — 1m data for scalping
             'sentiment': 1800,   # 30 minutes
-            'decide': 3600,      # 1 hour
-            'execute': 300,      # 5 minutes (check SL/TP)
+            'decide': 60,        # 1 minute — fast signals
+            'execute': 30,       # 30 seconds — fast execution
         }
         
         self.last_run = {
@@ -89,7 +89,10 @@ class CryptoTraderScheduler:
         try:
             self.logger.info(f"Running task: {task}")
             agent = self.agents[task]
-            result = agent.run_once()
+            if task == 'execute':
+                result = agent.run_once()
+            else:
+                result = agent.run_once()
             self.last_run[task] = time.time()
             
             self.logger.info(f"Task {task} completed: {result}")
