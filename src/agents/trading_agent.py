@@ -305,18 +305,108 @@ class TradingDecisionAgent(BaseAgent):
         return prompt
     
     def call_llm(self, prompt: str) -> Dict[str, Any]:
-        """Call LLM: DeepSeek V4 Flash -> Ollama"""
-        
-        # Try DeepSeek first
+        """Call LLM: DeepSeek V4 Flash -> RuAPI (claude-opus-4.6) -> Ollama
+
+        Auto-failover on HTTP 401/402 (auth failure / insufficient balance).
+        Tracks active provider in /tmp/trading_llm_active.txt for monitoring.
+        """
+
+        # === Primary: DeepSeek V4 Flash ===
         try:
             result = self._call_deepseek(prompt)
             if result:
+                self._set_active_provider('deepseek')
                 return result
         except Exception as e:
-            self.log('warning', f"DeepSeek failed: {e}, trying Ollama...")
-        
-        # Last resort: Ollama
-        return self._call_ollama(prompt)
+            err_str = str(e).lower()
+            if any(code in err_str for code in ['401', '402', 'unauthorized', 'insufficient']):
+                self.log('warning', f"DeepSeek auth/billing error: {e}")
+            else:
+                self.log('warning', f"DeepSeek failed: {e}, trying RuAPI...")
+
+        # === Fallback 1: RuAPI (Stepanovikov) — claude-opus-4.6 ===
+        try:
+            result = self._call_ruapi(prompt)
+            if result:
+                self._set_active_provider('ruapi')
+                return result
+        except Exception as e:
+            self.log('warning', f"RuAPI failed: {e}, trying Ollama...")
+
+        # === Last resort: Ollama ===
+        result = self._call_ollama(prompt)
+        self._set_active_provider('ollama')
+        return result
+
+    def _set_active_provider(self, provider: str):
+        """Write active provider to state file for monitoring."""
+        try:
+            state_file = '/tmp/trading_llm_active.txt'
+            with open(state_file, 'w') as f:
+                f.write(f"{provider}|{datetime.now().isoformat()}")
+        except:
+            pass
+
+    def _call_ruapi(self, prompt: str) -> Dict[str, Any]:
+        """Call RuAPI (Stepanovikov) — claude-opus-4.6."""
+        import os
+
+        # Load RuAPI key from .env
+        ruapi_key = None
+        env_path = os.path.expanduser('/home/andy/.env')
+        if os.path.exists(env_path):
+            with open(env_path, 'rb') as f:
+                for line in f:
+                    if line.startswith(b'RUAPI_API_KEY=') and b'***' not in line:
+                        ruapi_key = line.decode('utf-8', errors='replace').strip().split('=', 1)[1]
+                        break
+
+        if not ruapi_key:
+            raise ValueError("RUAPI_API_KEY not found in .env")
+
+        headers = {
+            'Authorization': f'Bearer {ruapi_key}',
+            'Content-Type': 'application/json',
+        }
+
+        data = {
+            'model': 'claude-opus-4.6',
+            'messages': [{'role': 'user', 'content': prompt}],
+            'temperature': 0.3,
+            'max_tokens': 512,
+        }
+
+        start = datetime.utcnow()
+        resp = requests.post(
+            'https://api.stepanovikov.uno/v1/chat/completions',
+            headers=headers, json=data, timeout=60
+        )
+        latency = (datetime.utcnow() - start).total_seconds() * 1000
+
+        if resp.status_code == 401:
+            raise ValueError(f"RuAPI HTTP 401 — Invalid API key")
+        elif resp.status_code == 402:
+            raise ValueError(f"RuAPI HTTP 402 — Insufficient Balance")
+
+        result = resp.json()
+        if 'choices' not in result:
+            raise ValueError(f"RuAPI error: {result}")
+
+        content = result['choices'][0]['message']['content'].strip()
+
+        if content.startswith('```'):
+            parts = content.split('```')
+            if len(parts) >= 2:
+                content = parts[1].strip()
+                if content.lower().startswith('json'):
+                    content = content[4:].strip()
+
+        decision = json.loads(content.strip())
+        decision['latency_ms'] = int(latency)
+        decision['tokens'] = result.get('usage', {}).get('total_tokens', 0)
+        decision['model'] = 'claude-opus-4.6 (RuAPI)'
+
+        return decision
     
     def _call_deepseek(self, prompt: str) -> Dict[str, Any]:
         """Call DeepSeek V4 Flash API"""
@@ -344,9 +434,14 @@ class TradingDecisionAgent(BaseAgent):
         )
         latency = (datetime.utcnow() - start).total_seconds() * 1000
         
+        # Check HTTP status before checking response body
+        if resp.status_code in (401, 402):
+            raise ValueError(f"DeepSeek HTTP {resp.status_code}: {resp.text[:200]}")
+
         result = resp.json()
         if 'choices' not in result:
-            raise ValueError(f"DeepSeek error: {result}")
+            err_msg = str(result)
+            raise ValueError(f"DeepSeek error: {err_msg}")
         content = result['choices'][0]['message']['content'].strip()
         
         # Try to parse JSON from response
