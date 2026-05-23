@@ -210,7 +210,8 @@ agents:
     enabled: true
     event_driven: true
     schedule_minutes: 15
-    min_confidence: 0.35
+    min_confidence: 0.25
+    signal_ttl_seconds: 600  # P2-FIX: was 300s, increased to 600s
   risk:
     enabled: true
     max_position_percent: 5

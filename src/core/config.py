@@ -20,7 +20,7 @@ class Config:
         # Load .env from project root
         project_root = Path(__file__).parent.parent.parent
         env_path = project_root / '.env'
-        load_dotenv(env_path)
+        load_dotenv(env_path, override=True)
         
         if config_path is None:
             config_path = project_root / "config" / "settings.yaml"

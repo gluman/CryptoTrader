@@ -977,9 +977,42 @@ class ExecutionAgent(BaseAgent):
                 # Find open position
                 position = self.get_open_position(symbol, exchange, market_type)
                 if not position:
-                    self.log('info', f"Skipping SELL for {symbol} — no open position")
-                    self.update_signal_status(signal_id, 'SKIPPED')
-                    continue
+                    # No position — for SELL signal on linear, OPEN SHORT instead
+                    if market_type == 'linear':
+                        self.log('info', f"No position for SELL {symbol} — opening SHORT")
+                        amount = self.calculate_position_size(signal_confidence, exchange, market_type)
+                        if amount < 3:
+                            self.log('warning', f"Position size too small for {symbol}: ${amount:.2f}")
+                            self.update_signal_status(signal_id, 'SKIPPED')
+                            continue
+                        amount_str = str(round(amount, 2))
+                        result = self.execute_linear_position(symbol, 'short', amount_str, exchange)
+                        if 'error' in result:
+                            errors += 1
+                            self.log('error', f"SHORT open failed for {symbol}: {result['error']}")
+                            self.update_signal_status(signal_id, 'FAILED')
+                            continue
+                        # Save trade
+                        trade_id = self.save_trade_to_db(signal_id, result)
+                        entry_price = float(result.get('price', 0))
+                        executed_qty = float(result.get('executed_qty', 0))
+                        cost = entry_price * executed_qty
+                        leverage = int(result.get('leverage', 2))
+                        self.create_position(
+                            symbol=symbol, exchange=exchange,
+                            entry_price=entry_price, quantity=executed_qty,
+                            cost_usdt=cost, signal_id=signal_id, trade_id=trade_id,
+                            market_type=market_type, side='SHORT', leverage=leverage,
+                        )
+                        executed += 1
+                        self.log('info', f"SHORT {symbol} | conf={signal_confidence:.0%} | ${amount:.2f}")
+                        details.append({'type': 'SHORT', 'symbol': symbol, 'price': entry_price,
+                                        'quantity': executed_qty, 'cost': cost, 'confidence': signal_confidence})
+                        continue
+                    else:
+                        self.log('info', f"Skipping SELL for {symbol} — no open position")
+                        self.update_signal_status(signal_id, 'SKIPPED')
+                        continue
 
                 # Get current price
                 ex = self.exchanges.get(exchange)

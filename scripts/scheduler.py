@@ -32,8 +32,8 @@ class CryptoTraderScheduler:
         self.intervals = {
             'collect': 600,            # 10 minutes
             'sentiment': 1800,         # 30 minutes
-            'decide': 900,             # 15 minutes
-            'execute': 300,            # 5 minutes
+            'decide': 300,             # 5 minutes
+            'execute': 120,           # 2 minutes
             'position_check': 60,      # 1 minute — SL/TP price polling
             'hourly_report': 3600,     # 1 hour
         }
@@ -134,6 +134,16 @@ class CryptoTraderScheduler:
             # Send hourly report
             if self.telegram and task == 'decide':
                 self._send_hourly_report()
+            
+                # Execute signals: linear (scalping) only — no spot execution
+                if task == 'execute':
+                    self.logger.info("Running execute for linear (scalping)...")
+                    exec_agent = self.agents.get('execute')
+                    if exec_agent:
+                        try:
+                            exec_agent.run_once(market_type='linear')
+                        except Exception as e:
+                            self.logger.error(f"Execute linear failed: {e}")
      
         except Exception as e:
             self.logger.error(f"Task {task} failed: {e}")

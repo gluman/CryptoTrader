@@ -22,8 +22,8 @@ class ScalpingStrategy(BaseStrategy):
             'max_position_size': 0.1,          # 10% of capital per trade
 
             # Indicators thresholds
-            'rsi_oversold': 35,
-            'rsi_overbought': 65,
+            'rsi_oversold': 40,
+            'rsi_overbought': 60,
             'rsi_fast': 5,                     # RSI period for scalping
             'volume_spike': 1.5,               # Volume must be 1.5x average
 

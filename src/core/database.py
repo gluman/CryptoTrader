@@ -105,6 +105,7 @@ class Signal(Base):
     model_version = Column(String(50))
     reasoning = Column(Text)
     status = Column(String(20), default='PENDING')
+    ttl_seconds = Column(Integer, default=900)  # S2: signal validity window (120s scalping/linear, 900s intraday/spot)
     executed_at = Column(DateTime(timezone=True))
     pnl_percent = Column(Numeric(10, 4))
     pnl_absolute = Column(Numeric(20, 8))
