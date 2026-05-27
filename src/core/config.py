@@ -177,6 +177,10 @@ class Config:
     def anythingllm(self) -> Dict:
         return self.get('anythingllm', {})
 
+    @property
+    def email(self) -> Dict:
+        return self.get('email', {})
+
     def reload(self):
         """Reload configuration from file"""
         Config._instance = None

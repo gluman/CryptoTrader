@@ -29,17 +29,19 @@ class CryptoTraderScheduler:
         
         # Scalping intervals (seconds)
         self.intervals = {
-            'collect': 60,       # 1 minute — 1m data for scalping
-            'sentiment': 1800,   # 30 minutes
-            'decide': 60,        # 1 minute — fast signals
-            'execute': 30,       # 30 seconds — fast execution
+            'collect': 60,           # 1 minute — 1m data for scalping
+            'sentiment': 1800,       # 30 minutes
+            'decide': 120,            # 2 minutes — faster signals (was 60s)
+            'execute': 60,            # 1 minute — faster execution (was 30s)
+            'position_check': 60,    # 1 minute — SL/TP polling
         }
-        
+
         self.last_run = {
             'collect': 0,
             'sentiment': 0,
             'decide': 0,
             'execute': 0,
+            'position_check': 0,
         }
     
     def setup(self, config_path=None):
@@ -81,8 +83,20 @@ class CryptoTraderScheduler:
     
     def should_run(self, task: str) -> bool:
         """Check if task should run based on interval"""
-        elapsed = time.time() - self.last_run[task]
+        if task not in self.intervals:
+            return False
+        elapsed = time.time() - self.last_run.get(task, 0)
         return elapsed >= self.intervals[task]
+
+    def _run_position_check(self):
+        """Lightweight SL/TP polling — invokes _check_and_execute_sl_tp without full execute cycle."""
+        executor = self.agents.get('execute')
+        if not executor:
+            return
+        try:
+            executor._check_and_execute_sl_tp()
+        except Exception as e:
+            self.logger.error(f"position_check failed: {e}")
     
     def run_task(self, task: str):
         """Execute a single task"""
@@ -126,7 +140,12 @@ class CryptoTraderScheduler:
                 for task in ['collect', 'sentiment', 'decide', 'execute']:
                     if self.should_run(task):
                         self.run_task(task)
-                
+
+                # SL/TP price polling every 60s (independent of full execute cycle)
+                if self.should_run('position_check'):
+                    self._run_position_check()
+                    self.last_run['position_check'] = time.time()
+
                 # Sleep 30 seconds between checks
                 time.sleep(30)
             

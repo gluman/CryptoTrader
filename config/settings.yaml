@@ -149,10 +149,46 @@ rss_feeds:
 # Exchange Selection Criteria
 # ============================================
 selection_criteria:
-  min_volume_24h: 50000000          # $50M
-  min_change_1h: 2.0                # 2% за час
-  max_spread_percent: 0.1           # 0.1%
+  min_volume_24h: 5000000
+  min_change_1h: 1.5
+  max_spread_percent: 0.1
   quote_currency: "USDT"
+  max_symbols: 30
+  # Whitelist/blacklist from 7d backtest (16k spike trades). See /tmp/backtest_spikes.py.
+  # Blacklist: net-loss pairs where mean-reversion stops cluster (strong trenders).
+  pair_blacklist:
+    - EDENUSDT
+    - IRYSUSDT
+    - SIRENUSDT
+    - MLNUSDT
+    - LABUSDT
+    - BSBUSDT
+    - BUSDT
+    - UBUSDT
+    - AIGENSYNUSDT
+    - QUSDT
+    - ETHFIUSDT
+    - AXLUSDT
+    - PARTIUSDT
+    - PIPPINUSDT
+  # Preferred whitelist (mean-reversion winners in backtest, avg >$0.01/trade)
+  # Spike-scanner can add anything tradable; this list is a soft preference for ranking.
+  pair_whitelist:
+    - PHAROSUSDT
+    - XMRUSDT
+    - CLUSDT
+    - DYMUSDT
+    - TONUSDT
+    - BANANAS31USDT
+    - MUUSDT
+    - CLOUSDT
+    - ORDIUSDT
+    - MNTUSDT
+    - OPENUSDT
+    - BOMEUSDT
+    - FHEUSDT
+    - EIGENUSDT
+    - JASMYUSDT
 
 # ============================================
 # CSS Indicator (Currency Slope Strength)
@@ -191,21 +227,34 @@ agents:
   trading_decision:
     enabled: true
     event_driven: true
-    min_confidence: 0.20
+    min_confidence: 0.75      # was 0.45 — raised 2026-05-26 (backtest: selectivity cuts losses)
+    vol_gate: 0.5             # skip bars with volume_ratio below this (no LLM call, no trade)
+    timeframe: "5m"
+    symbols: ["XRPUSDT", "DOGEUSDT", "TONUSDT"]   # 2026-05-27 minimal go-live: $5 floor pairs (BTC min ~$76, ETH ~$21)
   risk:
     enabled: true
     min_position_usd: 5.0
-    max_position_usd: 5.0
-    min_confidence_for_max_size: 0.8
-    default_stop_loss_percent: 1.5
-    default_take_profit_percent: 6.0
-    risk_reward_ratio: 4.0
+    max_position_usd: 5.0        # fixed minimal notional margin (read by execution_agent.position_usd)
+    leverage: 1                  # 1x — no liquidation risk (read by execution_agent.leverage)
+    min_confidence_for_max_size: 0.55
+    # ATR-based dynamic SL/TP. Floors prevent silly-tight stops on quiet bars.
+    # SL  = max(sl_floor_pct, k_sl × ATR_pct)
+    # TP  = max(tp_floor_pct, k_tp × ATR_pct)  with R/R cap enforced
+    default_stop_loss_percent: 0.30    # floor; effective SL may widen
+    default_take_profit_percent: 0.50  # floor; effective TP may widen
+    sl_atr_multiplier: 1.0             # k_sl — 1× ATR is industry-standard
+    tp_atr_multiplier: 1.7             # k_tp — 1.7× ATR gives ~1.7 R/R
+    risk_reward_ratio: 1.67
     trailing_stop_enabled: true
-    trailing_stop_activation_percent: 3.0
-    trailing_stop_distance_percent: 2.0
-    max_positions_per_symbol: 1     # max open positions per symbol (1 = one-way mode)
+    # Trailing armed AFTER position reaches activation pct (now in monitor loop, not at open)
+    trailing_stop_activation_percent: 0.20
+    trailing_stop_distance_percent: 0.10
+    max_positions_per_symbol: 1
+    max_open_positions_total: 3   # 2026-05-27 LIVE: up to 3 (one per symbol XRP/DOGE/TON), $5×3=$15 max exposure
+    daily_max_loss_usd: 1.5
+    sl_cooldown_seconds: 180
   executor:
-    enabled: true
+    enabled: true    # 2026-05-27 LIVE (minimal $5/1x on XRP/DOGE/TON)
     testnet_first: false
     confirmation_required: false
 

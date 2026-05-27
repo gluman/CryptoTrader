@@ -43,4 +43,5 @@ Thumbs.db
 
 # MQL compiled files
 *.ex5
-*.ex4
+*.ex4logs/
+.env.bak*

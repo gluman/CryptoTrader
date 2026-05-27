@@ -92,18 +92,19 @@ class DataCollectorAgent(BaseAgent):
     
     def select_symbols(self) -> List[str]:
         criteria = self.config.selection_criteria
-        min_volume = criteria.get('min_volume_24h', 50_000_000)
-        min_change = criteria.get('min_change_1h', 2.0)
+        min_volume = criteria.get('min_volume_24h', 5_000_000)
+        min_change = criteria.get('min_change_1h', 1.5)
         quote = criteria.get('quote_currency', 'USDT')
+        max_n = int(criteria.get('max_symbols', 30))
 
-        # Use Bybit for symbol selection (primary exchange)
         tickers = self.fetch_bybit_tickers()
-        selected = []
+        # Pre-sort by turnover desc, then iterate and pick movers
+        usdt_tickers = [t for t in tickers if t.get('symbol', '').endswith(quote)]
+        usdt_tickers.sort(key=lambda t: float(t.get('turnover24h', 0)), reverse=True)
 
-        for t in tickers[:500]:
-            symbol = t.get('symbol', '')
-            if not symbol.endswith(quote):
-                continue
+        selected = []
+        for t in usdt_tickers[:500]:
+            symbol = t['symbol']
             try:
                 volume = float(t.get('turnover24h', 0))
                 change = abs(float(t.get('price24hPcnt', 0)) * 100)
@@ -111,15 +112,14 @@ class DataCollectorAgent(BaseAgent):
                     selected.append(symbol)
             except (ValueError, TypeError):
                 continue
-            if len(selected) >= 15:
+            if len(selected) >= max_n:
                 break
 
-        self.log('info', f"Selected {len(selected)} symbols from {len(tickers)} Bybit tickers")
-        # Ensure BTCUSDT and ETHUSDT are always included for trading
+        self.log('info', f"Selected {len(selected)} symbols (min_vol=${min_volume/1e6:.0f}M, min_change={min_change}%, max_n={max_n})")
         for must_have in ['BTCUSDT', 'ETHUSDT']:
             if must_have not in selected:
                 selected.insert(0, must_have)
-        return selected[:20]
+        return selected[:max_n + 2]
 
     def fetch_bybit_tickers(self) -> List[Dict]:
         """Fetch all tickers from Bybit for symbol selection"""
@@ -288,18 +288,33 @@ class DataCollectorAgent(BaseAgent):
         stats['symbols_selected'] = len(symbols)
         
         # 2. Collect OHLCV for each symbol — Bybit source (all timeframes)
-        timeframes_bybit = {'1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240'}
+        # fetch_bybit_klines accepts string tf ('5m', etc.) and does its own mapping to Bybit numeric param
+        # Rate-limit: Bybit V5 caps ~120 req/min for unauthenticated market/kline. With 30×5=150 calls
+        # in burst we'd hit 10006. Throttle ~110ms between calls keeps us under 10 req/s comfortably.
+        import time as _t
+        timeframes_bybit = ['1m', '5m', '15m', '1h', '4h']
 
-        for symbol in symbols[:8]:
-            for tf, bybit_interval in timeframes_bybit.items():
+        rl_errors_in_row = 0
+        for symbol in symbols[:30]:
+            for tf in timeframes_bybit:
                 self.log('info', f"Fetching {symbol} {tf} from Bybit...")
                 try:
-                    data_bybit = self.fetch_bybit_klines(symbol, bybit_interval, limit=100)
+                    data_bybit = self.fetch_bybit_klines(symbol, tf, limit=100)
                     count = self.save_ohlcv_to_db(data_bybit)
                     stats['ohlcv_records'] += count
                     self.log('info', f"Saved {count} records for {symbol} {tf}")
+                    rl_errors_in_row = 0
                 except Exception as e:
-                    self.log('error', f"Failed to fetch {symbol} {tf}: {e}")
+                    msg = str(e)
+                    if '10006' in msg or 'rate limit' in msg.lower():
+                        rl_errors_in_row += 1
+                        # Exponential back-off on consecutive rate-limit errors
+                        backoff = min(5.0, 0.5 * (2 ** rl_errors_in_row))
+                        self.log('warning', f"Rate-limit hit {symbol} {tf}; backing off {backoff:.1f}s")
+                        _t.sleep(backoff)
+                    else:
+                        self.log('error', f"Failed to fetch {symbol} {tf}: {e}")
+                _t.sleep(0.11)  # ~9 req/s — well below the 10006 threshold
         
         # 3. Collect RSS news
         self.log('info', "Fetching RSS news...")

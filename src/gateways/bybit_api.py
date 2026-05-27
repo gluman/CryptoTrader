@@ -327,13 +327,16 @@ class BybitAPI:
 
     def set_position_sl(self, symbol: str, stop_loss: str,
                         take_profit: Optional[str] = None,
+                        side: str = 'Buy',
                         trailing_active: bool = False,
                         trailing_distance: Optional[str] = None) -> Dict:
         """Set or update SL/TP on open linear position.
-        Bybit V5 /v5/position/set-trading-stop"""
+        Bybit V5 /v5/position/trading-stop
+        side: 'Buy' for LONG, 'Sell' for SHORT"""
         json_data = {
             'category': 'linear',
             'symbol': symbol,
+            'side': side,
             'stopLoss': stop_loss,
         }
         if take_profit:
@@ -341,7 +344,7 @@ class BybitAPI:
         if trailing_active and trailing_distance:
             json_data['trailingStop'] = trailing_distance
             json_data['activePriceType'] = 'lastPrice'
-        return self._make_request('POST', '/v5/position/set-trading-stop', json_data=json_data)
+        return self._make_request('POST', '/v5/position/trading-stop', json_data=json_data)
 
     def get_open_positions_with_sl(self, category: str = 'linear', symbol: Optional[str] = None) -> Dict:
         """Get open positions with their SL/TP details"""

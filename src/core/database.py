@@ -112,6 +112,7 @@ class Signal(Base):
     ragflow_decision_id = Column(String(255))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    ttl_seconds = Column(Integer, default=600)  # Signal TTL (120s for scalping/linear, 900s for spot/intraday)
 
 
 class StrategySignal(Base):
@@ -134,6 +135,8 @@ class StrategySignal(Base):
     pnl_percent = Column(Numeric(10, 4))
     pnl_absolute = Column(Numeric(20, 8))
     exchange = Column(String(50), default='bybit')
+    exit_plan_json = Column(JSON)
+    source_signal_id = Column(BigInteger)  # FK → signals.id (lifecycle linkage)
 
 
 class Decision(Base):
@@ -220,6 +223,20 @@ class Position(Base):
     leverage = Column(Integer, default=1)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    # Multi-level exit plan
+    exit_plan_json = Column(JSON)
+    initial_quantity = Column(Numeric(30, 8))
+    tp1_price = Column(Numeric(20, 8))
+    tp1_qty_pct = Column(Numeric(5, 2))
+    tp1_hit_at = Column(DateTime(timezone=True))
+    tp2_price = Column(Numeric(20, 8))
+    tp2_qty_pct = Column(Numeric(5, 2))
+    tp2_hit_at = Column(DateTime(timezone=True))
+    tp3_price = Column(Numeric(20, 8))
+    tp3_qty_pct = Column(Numeric(5, 2))
+    tp3_hit_at = Column(DateTime(timezone=True))
+    partial_closes_count = Column(Integer, default=0)
+    max_hold_until = Column(DateTime(timezone=True))
 
 class AgentLog(Base):
     __tablename__ = 'agent_logs'

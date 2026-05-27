@@ -93,7 +93,7 @@ async def health():
 # ==================== Data Collection Tools ====================
 
 @app.post("/tools/collect")
-async def tool_collect_data(request: ToolRequest):
+async def tool_collect_data(request: Optional[ToolRequest] = None):
     """Collect market data from exchanges"""
     try:
         result = data_collector.run_once()
@@ -105,7 +105,7 @@ async def tool_collect_data(request: ToolRequest):
 
 
 @app.post("/tools/select_symbols")
-async def tool_select_symbols(request: ToolRequest):
+async def tool_select_symbols(request: Optional[ToolRequest] = None):
     """Select trading symbols based on criteria"""
     try:
         symbols = data_collector.select_symbols()
@@ -117,7 +117,7 @@ async def tool_select_symbols(request: ToolRequest):
 # ==================== Sentiment Tools ====================
 
 @app.post("/tools/sentiment")
-async def tool_analyze_sentiment(request: ToolRequest):
+async def tool_analyze_sentiment(request: Optional[ToolRequest] = None):
     """Analyze news sentiment"""
     try:
         result = sentiment.run_once()
@@ -173,6 +173,12 @@ async def tool_run_full_cycle():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/tools/decide/run")
+async def tool_run_full_cycle_post():
+    """Run full decision cycle (POST variant for n8n)"""
+    return await tool_run_full_cycle()
+
+
 # ==================== Execution Tools ====================
 
 @app.post("/tools/execute/buy")
@@ -216,16 +222,38 @@ async def tool_execute_sell(request: TradeRequest):
                 'exchange': request.exchange,
             })
             return {"status": "confirmation_required", "card": card}
-        
+
         result = executor.execute_spot_sell(
             request.symbol, request.amount, request.exchange
         )
-        
+
         if telegram and 'error' not in result:
             telegram.notify_trade(
                 request.symbol, 'SELL', request.amount, 0, request.exchange, 1.0
             )
-        
+
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tools/execute/run")
+async def tool_execute_run():
+    """Run full execution cycle: process PENDING signals + SL/TP checks. Called by n8n every 5 min."""
+    try:
+        result = executor.run_once()
+        return {"status": "success", "result": result}
+    except Exception as e:
+        if telegram:
+            telegram.notify_error("Execution", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tools/positions/check")
+async def tool_positions_check():
+    """Lightweight SL/TP poll for open positions. Called by n8n every 60s."""
+    try:
+        result = executor._check_and_execute_sl_tp()
         return {"status": "success", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
