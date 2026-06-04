@@ -1,0 +1,37 @@
+[Unit]
+Description=CryptoTrader API Server
+Documentation=https://github.com/cryptotrader
+After=network.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=cryptotrader
+Group=cryptotrader
+WorkingDirectory=/opt/cryptotrader
+Environment="PATH=/opt/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/cryptotrader/.env
+
+ExecStart=/opt/cryptotrader/.venv/bin/python /opt/cryptotrader/main.py --task api
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-api
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cryptotrader/logs
+ReadOnlyPaths=/opt/cryptotrader/config
+
+[Install]
+WantedBy=multi-user.target

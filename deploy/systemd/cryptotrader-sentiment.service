@@ -1,0 +1,16 @@
+[Unit]
+Description=CryptoTrader Sentiment Analysis
+After=network.target postgresql.service cryptotrader-collect.service
+
+[Service]
+Type=oneshot
+User=cryptotrader
+Group=cryptotrader
+WorkingDirectory=/opt/cryptotrader
+Environment="PATH=/opt/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/cryptotrader/.env
+
+ExecStart=/opt/cryptotrader/.venv/bin/python /opt/cryptotrader/main.py --task sentiment
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader-sentiment
