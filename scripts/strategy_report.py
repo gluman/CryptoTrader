@@ -54,7 +54,7 @@ def main():
         for поз in позы:
             сим = поз['symbol'].replace('USDT', '')
             пнл = float(поз.get('unrealisedPnl', 0))
-            вход = float(поз['entryPrice'])
+            вход = float(поз.get('entryPrice') or поз.get('avgPrice') or 0)
             текущая = float(поз.get('markPrice', вход))
             сторона = 'ЛОНГ' if поз['side'] == 'Buy' else 'ШОРТ'
             изм = ((текущая - вход) / вход * 100) * (1 if сторона == 'ЛОНГ' else -1)

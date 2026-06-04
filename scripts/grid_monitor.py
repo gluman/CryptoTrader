@@ -70,7 +70,7 @@ def main():
         for pp in pos_list:
             sym = pp['symbol'].replace('USDT', '')
             pnl = float(pp.get('unrealisedPnl', 0))
-            entry = float(pp['entryPrice'])
+            entry = float(pp.get('entryPrice') or pp.get('avgPrice') or 0)
             mark = float(pp.get('markPrice', entry))
             side = 'L' if pp['side'] == 'Buy' else 'S'
             chg = ((mark - entry) / entry * 100) * (1 if side == 'L' else -1)
