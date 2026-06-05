@@ -25,6 +25,7 @@ class DataCollectorAgent(BaseAgent):
             api_key=config.bybit['api_key'],
             api_secret=config.bybit['api_secret'],
             testnet=config.bybit.get('testnet', False),
+            recv_window=60000,
             logger=logger
         )
     
@@ -116,10 +117,16 @@ class DataCollectorAgent(BaseAgent):
                 break
 
         self.log('info', f"Selected {len(selected)} symbols (min_vol=${min_volume/1e6:.0f}M, min_change={min_change}%, max_n={max_n})")
-        for must_have in ['BTCUSDT', 'ETHUSDT']:
+        # Always collect the actually-traded pairs (config.trading_decision.symbols) + BTC/ETH,
+        # regardless of the volume/volatility filter. Otherwise on a quiet market XRP/DOGE/TON
+        # drop out of selection, their candles go stale, and the decision stale-guard skips them
+        # (XRP fell 15h behind, DOGE 21h on 2026-05-27). [Fix 2026-05-27]
+        _td = (getattr(self.config, 'agents', {}) or {}).get('trading_decision', {})
+        must_haves = list(_td.get('symbols') or []) + ['BTCUSDT', 'ETHUSDT']
+        for must_have in must_haves:
             if must_have not in selected:
                 selected.insert(0, must_have)
-        return selected[:max_n + 2]
+        return selected[:max_n + len(must_haves)]
 
     def fetch_bybit_tickers(self) -> List[Dict]:
         """Fetch all tickers from Bybit for symbol selection"""

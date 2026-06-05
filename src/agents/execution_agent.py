@@ -141,8 +141,14 @@ class ExecutionAgent(BaseAgent):
                 'apiKey': self.config.bybit['api_key'],
                 'secret': self.config.bybit['api_secret'],
                 'enableRateLimit': True,
-                'options': {'defaultType': 'swap', 'defaultMarginMode': 'isolated'}
+                'adjustForTimeDifference': True,
+                'options': {'defaultType': 'swap', 'defaultMarginMode': 'isolated', 'recvWindow': 60000}
             })
+            # Sync local clock with Bybit server (critical for 10002 timestamp error)
+            try:
+                self.ccxt_bybit.load_time_difference()
+            except Exception as e:
+                self.log('warning', f'load_time_difference failed: {e}')
             # Test ccxt is working
             try:
                 self.ccxt_bybit.fetch_balance(params={'type': 'swap', 'accountType': 'UNIFIED'})

@@ -22,7 +22,7 @@ class BybitAPI:
     last_call_time = 0
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, 
-                 recv_window: int = 5000, logger: Optional[logging.Logger] = None):
+                 recv_window: int = 60000, logger: Optional[logging.Logger] = None):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
