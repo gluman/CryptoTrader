@@ -244,9 +244,18 @@ def _simulate_trade(
 
 # === Метрики ===
 
+def _empty_metrics() -> Dict[str, Any]:
+    return {
+        "trades": 0, "wins": 0, "losses": 0, "wr_pct": 0.0, "pnl_usd": 0.0,
+        "pf": 0.0, "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "avg_hold_min": 0.0,
+        "max_dd_usd": 0.0, "sharpe_like": 0.0, "tp_hits": 0, "sl_hits": 0,
+        "max_hold_exits": 0,
+    }
+
+
 def compute_metrics(trades: List[TradeResult]) -> Dict[str, Any]:
     if not trades:
-        return {"trades": 0, "wr_pct": 0.0, "pnl_usd": 0.0, "pf": 0.0, "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "max_dd_pct": 0.0}
+        return _empty_metrics()
     n = len(trades)
     wins = [t for t in trades if t.pnl_pct_net > 0]
     losses = [t for t in trades if t.pnl_pct_net <= 0]
@@ -344,7 +353,7 @@ def main():
             t0 = time.time()
             back_trades = run_backtest_for_strategy(strat, back_start, back_end, size_usdt=args.size)
             back_metrics = compute_metrics(back_trades)
-            back_metrics = {k: v for k, v in back_metrics.items()}  # ensure keys
+            back_metrics = back_metrics or _empty_metrics()
             elapsed = time.time() - t0
             print(f"  Trades: {back_metrics['trades']}  WR: {back_metrics['wr_pct']}%  "
                   f"PnL: ${back_metrics['pnl_usd']}  PF: {back_metrics['pf']}  "
@@ -362,7 +371,7 @@ def main():
             t0 = time.time()
             fwd_trades = run_backtest_for_strategy(strat, fwd_start, fwd_end, size_usdt=args.size)
             fwd_metrics = compute_metrics(fwd_trades)
-            fwd_metrics = {k: v for k, v in fwd_metrics.items()}  # ensure keys
+            fwd_metrics = fwd_metrics or _empty_metrics()
             elapsed = time.time() - t0
             print(f"  Trades: {fwd_metrics['trades']}  WR: {fwd_metrics['wr_pct']}%  "
                   f"PnL: ${fwd_metrics['pnl_usd']}  PF: {fwd_metrics['pf']}  "
