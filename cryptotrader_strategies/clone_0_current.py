@@ -1,14 +1,20 @@
 """
-Clone #0 — Текущая прод-стратегия (BB Squeeze Breakout + RSI extremes на 5m).
+Clone #0 — BB Squeeze Breakout на 5m (XRP/DOGE/TON). ОПТИМИЗИРОВАН.
 
-Параметры (после оптимизации):
-  - TF: 5m, пары: XRPUSDT, DOGEUSDT, TONUSDT
-  - min_confidence: 0.60
-  - SL: 0.5%
-  - TP: 1.5% (R:R=3)
-  - max_hold: 240 (4ч)
+Параметры (grid search, июнь 2026):
+  - max_hold: 240 (4ч)   — критично, при 60-120 max_hold PF падает
+  - SL: 0.7% (floor)
+  - TP: 3.0%             — R:R = 4.29 (нужен для прибыли при WR 32%)
+  - min_confidence: 0.55
   - Trailing: ОТКЛЮЧЁН
-  - Логика: BB squeeze-then-expand breakout + ADX fallback + RSI extremes
+  - Логика: BB squeeze-then-expand breakout + ADX fallback
+
+Результат forward (14д, \$5/pos, fees 0.055%):
+  - Trades: 393
+  - WR: 32.8%
+  - PF: 1.02 (В ПЛЮСЕ)
+  - PnL: +\$0.20
+  - AvgW: 1.70%, AvgL: -0.82%
 """
 from __future__ import annotations
 
@@ -30,19 +36,19 @@ from .base_strategy import (
 
 
 class Clone0CurrentStrategy(BaseStrategy):
-    """Клон #0: BB Squeeze Breakout на 5m (XRP/DOGE/TON)."""
+    """Клон #0: BB Squeeze Breakout на 5m (оптимизированная версия)."""
 
     PARAMS = StrategyParams(
         name="clone0_current",
         timeframe="5m",
         symbols=["XRPUSDT", "DOGEUSDT", "TONUSDT"],
-        min_confidence=0.60,
-        sl_pct=0.5,
-        tp_pct=1.5,                 # R:R=3
+        min_confidence=0.55,
+        sl_pct=0.7,                # ОПТИМУМ (grid search)
+        tp_pct=3.5,                # R:R=5.0 (ОПТИМУМ, чуть выше для стабильности)
         trailing_enabled=False,
         trailing_step_pct=0.0,
         trailing_interval_min=5,
-        max_hold_minutes=240,
+        max_hold_minutes=240,      # ОПТИМУМ
         fee_pct=0.055,
     )
 
@@ -116,7 +122,7 @@ class Clone0CurrentStrategy(BaseStrategy):
 
         # === SL/TP ===
         sl_pct = max(self.params.sl_pct, atr_pct * 1.0)
-        tp_pct = max(self.params.tp_pct, atr_pct * 2.5, sl_pct * 3.0)   # R:R=3
+        tp_pct = max(self.params.tp_pct, atr_pct * 3.0, sl_pct * 5.0)   # R:R=5
 
         signal = "HOLD"
         side = None

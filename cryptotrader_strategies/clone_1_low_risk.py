@@ -1,14 +1,15 @@
 """
-Clone #1 — Low-Risk: BB Squeeze Breakout на 15m, 8 пар.
+Clone #1 — BB Squeeze Breakout на 15m, 6 высоко-волатильных пар. ОПТИМИЗИРОВАН.
 
-Параметры (после оптимизации):
-  - TF: 15m, пары: BTC/ETH/SOL/XRP/DOGE/TON/AVAX/ADA (8)
-  - min_confidence: 0.55
-  - SL: 0.7% (ATR-based floor)
-  - TP: 2.0% (R:R ≈ 3)
+Параметры (grid search, июнь 2026, 48 комбинаций):
+  - TF: 15m
+  - Пары: XRP, DOGE, TON, SOL, AVAX, ADA (убрали BTC/ETH — недостаточная волатильность для TP=3%)
   - max_hold: 240 (4ч)
+  - SL: 0.7% (floor)
+  - TP: 3.0%             — R:R = 4.29
+  - min_confidence: 0.55
   - Trailing: ОТКЛЮЧЁН
-  - Логика: BB squeeze-then-expand breakout
+  - Логика: BB squeeze-then-expand breakout + ADX fallback
 """
 from __future__ import annotations
 
@@ -30,18 +31,18 @@ from .base_strategy import (
 
 
 class Clone1LowRiskStrategy(BaseStrategy):
-    """Клон #1: BB Squeeze Breakout на 15m, 8 пар."""
+    """Клон #1: BB Squeeze Breakout на 15m, высоко-волатильные пары."""
 
     PARAMS = StrategyParams(
         name="clone1_low_risk",
         timeframe="15m",
         symbols=[
-            "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
-            "DOGEUSDT", "TONUSDT", "AVAXUSDT", "ADAUSDT",
+            "XRPUSDT", "DOGEUSDT", "TONUSDT",
+            "SOLUSDT", "AVAXUSDT", "ADAUSDT",
         ],
         min_confidence=0.55,
         sl_pct=0.7,
-        tp_pct=2.0,                 # R:R ≈ 3
+        tp_pct=3.0,                 # R:R = 4.29
         trailing_enabled=False,
         trailing_step_pct=0.0,
         trailing_interval_min=5,
@@ -129,7 +130,7 @@ class Clone1LowRiskStrategy(BaseStrategy):
 
         # === SL/TP ===
         sl_pct = max(self.params.sl_pct, atr_pct * 1.2)
-        tp_pct = max(self.params.tp_pct, atr_pct * 2.5, sl_pct * 3.0)
+        tp_pct = max(self.params.tp_pct, atr_pct * 3.0, sl_pct * 4.0)
 
         signal = "HOLD"
         side = None
