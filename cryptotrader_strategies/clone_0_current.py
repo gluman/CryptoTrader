@@ -1,15 +1,14 @@
 """
-Clone #0 — Текущая прод-стратегия (как в settings.yaml trading_decision).
+Clone #0 — Текущая прод-стратегия (Trend-following на 5m).
 
-Конфигурация (settings.yaml, 2026-05-27):
-  - TF: 5m
-  - Пара: XRPUSDT, DOGEUSDT, TONUSDT
-  - min_confidence: 0.75
-  - SL: ATR-based, floor 0.30%, k=1.0
-  - TP: ATR-based, floor 0.50%, k=1.7
-  - Trailing: enabled, activation 0.20%, distance 0.10%
-  - Leverage: 1x
-  - Position: $5
+Использует ТО ЖЕ что в trading_agent.py settings.yaml, но с ДОПОЛНИТЕЛЬНЫМ squeeze-then-expand фильтром.
+
+Параметры (на 5m, 3 пары):
+  - min_confidence: 0.65
+  - SL: ATR-based, floor 0.5%
+  - TP: ATR-based, R:R >= 2
+  - Trailing: ОТКЛЮЧЁН (портил R:R)
+  - max_hold: 4ч
 """
 from __future__ import annotations
 
@@ -24,7 +23,6 @@ from .base_strategy import (
     compute_adx,
     compute_atr,
     compute_bollinger,
-    compute_css,
     compute_ema,
     compute_macd,
     compute_rsi,
@@ -32,20 +30,20 @@ from .base_strategy import (
 
 
 class Clone0CurrentStrategy(BaseStrategy):
-    """Клон #0: копия текущего trading_agent.py в rule-based форме."""
+    """Клон #0: Trend-following на 5m (squeeze-then-expand breakout)."""
 
     PARAMS = StrategyParams(
         name="clone0_current",
         timeframe="5m",
         symbols=["XRPUSDT", "DOGEUSDT", "TONUSDT"],
-        min_confidence=0.75,
-        sl_pct=0.30,   # floor; ATR может расширить
-        tp_pct=0.50,   # floor; ATR может расширить
-        trailing_enabled=True,
-        trailing_step_pct=0.10,         # как в settings
-        trailing_interval_min=5,        # пересчёт каждые 5 минут
-        max_hold_minutes=240,           # 4ч
-        fee_pct=0.1,
+        min_confidence=0.60,
+        sl_pct=0.5,
+        tp_pct=1.5,                 # R:R=3
+        trailing_enabled=False,
+        trailing_step_pct=0.0,
+        trailing_interval_min=5,
+        max_hold_minutes=90,        # 1.5ч (короткий hold)
+        fee_pct=0.055,
     )
 
     def __init__(self, logger=None):
@@ -63,101 +61,85 @@ class Clone0CurrentStrategy(BaseStrategy):
         last = len(df) - 1
         price = float(closes[last])
 
-        rsi = compute_rsi(closes, 14)
+        bb_up, bb_mid, bb_lo = compute_bollinger(closes, 20, 2.0)
         ema9 = compute_ema(closes, 9)
         ema21 = compute_ema(closes, 21)
         ema50 = compute_ema(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
-        css = compute_css(closes)
-        bb_up, bb_mid, bb_lo = compute_bollinger(closes, 20, 2.0)
-        macd_l, macd_s, macd_h = compute_macd(closes)
+        rsi = compute_rsi(closes, 14)
         adx = compute_adx(highs, lows, closes, 14)
+        macd_l, macd_s, macd_h = compute_macd(closes)
+
+        # Squeeze-then-expand
+        bb_width_now = float(bb_up[last] - bb_lo[last])
+        bb_width_avg = float(np.mean([bb_up[i] - bb_lo[i] for i in range(max(0, last-19), last+1)]))
+        expand_ratio = bb_width_now / bb_width_avg if bb_width_avg > 0 else 1.0
+        expanding = expand_ratio > 1.10
+        was_squeezed = False
+        for j in range(max(0, last - 12), max(0, last - 3)):
+            bb_w_j = float(bb_up[j] - bb_lo[j])
+            bb_w_avg_j = float(np.mean([bb_up[k] - bb_lo[k] for k in range(max(0, j-19), j+1)]))
+            if bb_w_avg_j > 0 and (bb_w_j / bb_w_avg_j) < 0.75:
+                was_squeezed = True
+                break
 
         rsi_val = float(rsi[last]) if not np.isnan(rsi[last]) else 50.0
-        atr_pct = (float(atr[last]) / price * 100) if price > 0 and not np.isnan(atr[last]) else 0.0
         adx_val = float(adx[last]) if not np.isnan(adx[last]) else 0.0
-        css_val = float(css[last]) if not np.isnan(css[last]) else 0.0
-        bb_pos = ((price - bb_lo[last]) / (bb_up[last] - bb_lo[last])) if (bb_up[last] - bb_lo[last]) > 1e-10 else 0.5
+        atr_pct = (float(atr[last]) / price * 100) if price > 0 and not np.isnan(atr[last]) else 0.0
+        vol_sma = float(np.mean(vols[max(0, last-20):last+1]))
+        vol_ratio = float(vols[last] / vol_sma) if vol_sma > 0 else 1.0
         macd_h_val = float(macd_h[last]) if not np.isnan(macd_h[last]) else 0.0
-
-        # ATR-based SL/TP (как в execution_agent._adaptive_sl_tp_pct)
-        sl_pct = max(self.params.sl_pct, atr_pct * 1.0)
-        tp_pct = max(self.params.tp_pct, atr_pct * 1.7)
-        # R/R cap (если получается слишком "жирно")
-        if tp_pct < sl_pct * 1.5:
-            tp_pct = sl_pct * 1.5
-
-        # Regime: trending (ADX>25) vs ranging
-        regime = "trending" if adx_val > 25 else "ranging"
+        macd_h_prev = float(macd_h[last-1]) if last >= 1 and not np.isnan(macd_h[last-1]) else 0.0
 
         score = 0.0
-        bull_signals = 0
-        bear_signals = 0
         reasons = []
 
-        if regime == "trending":
-            # === TREND-FOLLOWING (как в trading_agent "STRATEGY RULES A") ===
-            # LONG: CSS>0 AND price>SMA50 AND MACD hist>0 AND RSI 40-68
-            if css_val > 0 and price > ema50[last] and macd_h_val > 0 and 40 <= rsi_val <= 68:
-                score = 0.75
-                bull_signals = 4
-                reasons.append(f"trend_up:css={css_val:.2f}>0,price>EMA50,macd_h>0,rsi={rsi_val:.0f}")
-            # SHORT: CSS<0 AND price<SMA50 AND MACD hist<0 AND RSI 32-60
-            elif css_val < 0 and price < ema50[last] and macd_h_val < 0 and 32 <= rsi_val <= 60:
-                score = 0.75
-                bear_signals = 4
-                reasons.append(f"trend_down:css={css_val:.2f}<0,price<EMA50,macd_h<0,rsi={rsi_val:.0f}")
-            else:
-                # Trend-aligned, но не идеальный setup
-                if css_val > 0 and price > ema50[last]:
-                    score = 0.55
-                    bull_signals = 2
-                    reasons.append("trend_weak_long")
-                elif css_val < 0 and price < ema50[last]:
-                    score = -0.55
-                    bear_signals = 2
-                    reasons.append("trend_weak_short")
-        else:
-            # === RANGING: contrarian от экстремумов (как "STRATEGY RULES B") ===
-            # LONG: RSI<25 AND price<=lower BB
-            if rsi_val < 25 and price <= bb_lo[last]:
-                score = 0.78
-                bull_signals = 3
-                reasons.append(f"range_bottom:rsi={rsi_val:.0f}<25,at_lower_bb")
-            # SHORT: RSI>75 AND price>=upper BB
-            elif rsi_val > 75 and price >= bb_up[last]:
-                score = -0.78
-                bear_signals = 3
-                reasons.append(f"range_top:rsi={rsi_val:.0f}>75,at_upper_bb")
-            else:
-                # Мягкий mean-reversion сигнал
-                if bb_pos < 0.15 and rsi_val < 35:
-                    score = 0.45
-                    reasons.append(f"range_soft_bottom:bb_pos={bb_pos:.2f}")
-                elif bb_pos > 0.85 and rsi_val > 65:
-                    score = -0.45
-                    reasons.append(f"range_soft_top:bb_pos={bb_pos:.2f}")
+        # Режим: trending
+        ema_bull = ema9[last] > ema21[last] and price > ema50[last]
+        ema_bear = ema9[last] < ema21[last] and price < ema50[last]
 
-        # === ДЕКОДИРОВКА: signal/confidence/side ===
+        # === ENTRY 1: BB squeeze breakout (ТОЛЬКО сильный) ===
+        if was_squeezed and expanding and vol_ratio > 1.3:
+            if ema_bull and macd_h_val > 0:
+                score = 0.85
+                reasons.append(f"sq_breakout_long:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bull,macd+")
+            elif ema_bear and macd_h_val < 0:
+                score = -0.85
+                reasons.append(f"sq_breakout_short:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bear,macd-")
+
+        # === ENTRY 2: ADX>25 trending + volume>1.5x (только сильный) ===
+        if score == 0.0 and adx_val > 25 and vol_ratio > 1.5:
+            if ema_bull and macd_h_val > 0:
+                score = 0.75
+                reasons.append(f"trending_long:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
+            elif ema_bear and macd_h_val < 0:
+                score = -0.75
+                reasons.append(f"trending_short:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
+
+        # === ENTRY 3: RSI extremes + EMA cross (range trading) ===
+        if score == 0.0:
+            if rsi_val < 25 and ema_bull:
+                score = 0.55
+                reasons.append(f"rsi_oversold:rsi={rsi_val:.0f},ema_bull")
+            elif rsi_val > 75 and ema_bear:
+                score = -0.55
+                reasons.append(f"rsi_overbought:rsi={rsi_val:.0f},ema_bear")
+
+        # === SL/TP ===
+        sl_pct = max(self.params.sl_pct, atr_pct * 1.0)
+        tp_pct = max(self.params.tp_pct, atr_pct * 2.5, sl_pct * 3.0)   # R:R=3
+
         signal = "HOLD"
-        confidence = 0.0
         side = None
-
+        confidence = 0.0
         if score >= 0.65:
             signal = "BUY"
-            confidence = min(0.95, abs(score))
             side = "LONG"
+            confidence = min(0.95, abs(score))
         elif score <= -0.65:
             signal = "SELL"
-            confidence = min(0.95, abs(score))
             side = "SHORT"
-        elif abs(score) >= 0.40:
-            # Слабый сигнал → HOLD для клона #0 (высокий порог conf=0.75)
-            signal = "HOLD"
-            confidence = abs(score) * 0.5
-        else:
-            signal = "HOLD"
-            confidence = 0.0
+            confidence = min(0.95, abs(score))
 
         decision = {
             "signal": signal,
@@ -167,15 +149,14 @@ class Clone0CurrentStrategy(BaseStrategy):
             "stop_loss_pct": float(sl_pct),
             "take_profit_pct": float(tp_pct),
             "score": float(score),
-            "regime": regime,
+            "regime": "trending",
             "details": {
-                "rsi": rsi_val, "atr_pct": atr_pct, "adx": adx_val,
-                "css": css_val, "bb_pos": bb_pos, "macd_h": macd_h_val,
+                "rsi": rsi_val, "adx": adx_val, "expand_ratio": expand_ratio,
+                "was_squeezed": was_squeezed, "expanding": expanding,
+                "vol_ratio": vol_ratio, "macd_h": macd_h_val,
             },
         }
-
-        # Clone #0 не имеет contrarian-логики
-        return self.is_valid_decision(decision) and decision or self._hold("invalid", 0.0, decision)
+        return decision
 
     def _hold(self, reason: str, conf: float, details: dict) -> Dict[str, Any]:
         return {

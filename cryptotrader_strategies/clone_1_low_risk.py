@@ -1,13 +1,14 @@
 """
-Clone #1 — Low-risk: 15m, 8 пар, conf=0.5, SL=1%, TP=1%, trailing 0.1%/5min.
+Clone #1 — Low-Risk: BB Squeeze Breakout на 15m, 8 пар.
 
-Логика ("урвать прибыль, пусть небольшую"):
-  - Чаще входим (низкий conf-порог = 0.5)
-  - Маленькие SL/TP = 1% (быстрые сделки)
-  - Trailing подтягивает SL в безубыток/прибыль по 0.1% каждые 5 минут
-  - 8 пар (BTC, ETH, SOL, XRP, DOGE, TON, AVAX, ADA) для диверсификации
-
-По сути: тот же score-engine что Clone0, но с другими параметрами и расширенным списком пар.
+Параметры (после оптимизации):
+  - TF: 15m, пары: BTC/ETH/SOL/XRP/DOGE/TON/AVAX/ADA (8)
+  - min_confidence: 0.55
+  - SL: 0.7% (ATR-based floor)
+  - TP: 2.0% (R:R ≈ 3)
+  - max_hold: 240 (4ч)
+  - Trailing: ОТКЛЮЧЁН
+  - Логика: BB squeeze-then-expand breakout
 """
 from __future__ import annotations
 
@@ -19,9 +20,9 @@ import pandas as pd
 from .base_strategy import (
     BaseStrategy,
     StrategyParams,
+    compute_adx,
     compute_atr,
     compute_bollinger,
-    compute_css,
     compute_ema,
     compute_macd,
     compute_rsi,
@@ -29,7 +30,7 @@ from .base_strategy import (
 
 
 class Clone1LowRiskStrategy(BaseStrategy):
-    """Клон #1: low-risk scalp на 15m по 8 парам."""
+    """Клон #1: BB Squeeze Breakout на 15m, 8 пар."""
 
     PARAMS = StrategyParams(
         name="clone1_low_risk",
@@ -38,14 +39,14 @@ class Clone1LowRiskStrategy(BaseStrategy):
             "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
             "DOGEUSDT", "TONUSDT", "AVAXUSDT", "ADAUSDT",
         ],
-        min_confidence=0.50,         # ↓ с 0.75 (больше входов)
-        sl_pct=1.0,                  # фиксированный 1%
-        tp_pct=1.0,                  # фиксированный 1%
-        trailing_enabled=True,
-        trailing_step_pct=0.1,       # шаг 0.1%
-        trailing_interval_min=5,     # проверка каждые 5 мин
+        min_confidence=0.55,
+        sl_pct=0.7,
+        tp_pct=2.0,                 # R:R ≈ 3
+        trailing_enabled=False,
+        trailing_step_pct=0.0,
+        trailing_interval_min=5,
         max_hold_minutes=240,
-        fee_pct=0.1,
+        fee_pct=0.055,
     )
 
     def __init__(self, logger=None):
@@ -63,139 +64,98 @@ class Clone1LowRiskStrategy(BaseStrategy):
         last = len(df) - 1
         price = float(closes[last])
 
-        rsi = compute_rsi(closes, 14)
+        bb_up, bb_mid, bb_lo = compute_bollinger(closes, 20, 2.0)
         ema9 = compute_ema(closes, 9)
         ema21 = compute_ema(closes, 21)
+        ema50 = compute_ema(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
-        css = compute_css(closes)
-        bb_up, bb_mid, bb_lo = compute_bollinger(closes, 20, 2.0)
+        rsi = compute_rsi(closes, 14)
+        adx = compute_adx(highs, lows, closes, 14)
         macd_l, macd_s, macd_h = compute_macd(closes)
-        vol_sma = pd.Series(vols).rolling(20).mean().values[last]
-        vol_ratio = float(vols[last] / vol_sma) if vol_sma > 0 else 1.0
+
+        # Squeeze-then-expand
+        bb_width_now = float(bb_up[last] - bb_lo[last])
+        bb_width_avg = float(np.mean([bb_up[i] - bb_lo[i] for i in range(max(0, last-19), last+1)]))
+        expand_ratio = bb_width_now / bb_width_avg if bb_width_avg > 0 else 1.0
+        expanding = expand_ratio > 1.10
+        was_squeezed = False
+        for j in range(max(0, last - 12), max(0, last - 3)):
+            bb_w_j = float(bb_up[j] - bb_lo[j])
+            bb_w_avg_j = float(np.mean([bb_up[k] - bb_lo[k] for k in range(max(0, j-19), j+1)]))
+            if bb_w_avg_j > 0 and (bb_w_j / bb_w_avg_j) < 0.75:
+                was_squeezed = True
+                break
 
         rsi_val = float(rsi[last]) if not np.isnan(rsi[last]) else 50.0
-        css_val = float(css[last]) if not np.isnan(css[last]) else 0.0
-        bb_pos = ((price - bb_lo[last]) / (bb_up[last] - bb_lo[last])) if (bb_up[last] - bb_lo[last]) > 1e-10 else 0.5
+        adx_val = float(adx[last]) if not np.isnan(adx[last]) else 0.0
+        atr_pct = (float(atr[last]) / price * 100) if price > 0 and not np.isnan(atr[last]) else 0.0
+        vol_sma = float(np.mean(vols[max(0, last-20):last+1]))
+        vol_ratio = float(vols[last] / vol_sma) if vol_sma > 0 else 1.0
         macd_h_val = float(macd_h[last]) if not np.isnan(macd_h[last]) else 0.0
-        macd_h_prev = float(macd_h[last - 1]) if last >= 1 and not np.isnan(macd_h[last - 1]) else 0.0
+        macd_h_prev = float(macd_h[last-1]) if last >= 1 and not np.isnan(macd_h[last-1]) else 0.0
 
-        # === Простая scoring-система (как в /tmp/backtest_score_engine.py) ===
         score = 0.0
         reasons = []
 
-        # 1. Price momentum (1h ≈ 4 бара на 15m, 6h ≈ 24 бара)
-        ch1h = ((closes[last] - closes[last - 4]) / closes[last - 4] * 100) if last >= 4 else 0.0
-        ch6h = ((closes[last] - closes[last - 24]) / closes[last - 24] * 100) if last >= 24 else 0.0
-        if ch1h > 0.3:
-            score += 0.4
-            reasons.append(f"ch1h={ch1h:+.2f}%")
-        elif ch1h < -0.3:
-            score -= 0.4
-            reasons.append(f"ch1h={ch1h:+.2f}%")
-        if ch6h > 0.8:
-            score += 0.7
-            reasons.append(f"ch6h={ch6h:+.2f}%")
-        elif ch6h < -0.8:
-            score -= 0.7
-            reasons.append(f"ch6h={ch6h:+.2f}%")
+        ema_bull = ema9[last] > ema21[last] and price > ema50[last]
+        ema_bear = ema9[last] < ema21[last] and price < ema50[last]
 
-        # 2. RSI
-        if rsi_val < 30:
-            score += 0.8
-            reasons.append(f"rsi={rsi_val:.0f}<30")
-        elif rsi_val < 40:
-            score += 0.4
-            reasons.append(f"rsi={rsi_val:.0f}<40")
-        elif rsi_val > 70:
-            score -= 0.8
-            reasons.append(f"rsi={rsi_val:.0f}>70")
-        elif rsi_val > 60:
-            score -= 0.4
-            reasons.append(f"rsi={rsi_val:.0f}>60")
+        # === ENTRY 1: BB squeeze breakout (ОСНОВНОЙ, score=0.85) ===
+        if was_squeezed and expanding and vol_ratio > 1.0:
+            if ema_bull and macd_h_val > 0:
+                score = 0.85
+                reasons.append(f"sq_breakout_long:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bull")
+            elif ema_bear and macd_h_val < 0:
+                score = -0.85
+                reasons.append(f"sq_breakout_short:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bear")
 
-        # 3. EMA cross
-        cross_now = ema9[last] - ema21[last]
-        cross_prev = ema9[last - 1] - ema21[last - 1] if last >= 1 else 0
-        if cross_prev < 0 < cross_now:
-            score += 0.6
-            reasons.append("ema_golden_cross")
-        elif cross_prev > 0 > cross_now:
-            score -= 0.6
-            reasons.append("ema_death_cross")
-        elif cross_now > 0:
-            score += 0.2
-        else:
-            score -= 0.2
+        # === FALLBACK: ADX>20 trending ===
+        if score == 0.0 and adx_val > 20 and vol_ratio > 1.0:
+            if ema_bull and macd_h_val > 0:
+                score = 0.65
+                reasons.append(f"trending_long:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
+            elif ema_bear and macd_h_val < 0:
+                score = -0.65
+                reasons.append(f"trending_short:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
 
-        # 4. Bollinger position
-        if price <= bb_lo[last]:
-            score += 0.5
-            reasons.append("at_lower_bb")
-        elif price >= bb_up[last]:
-            score -= 0.5
-            reasons.append("at_upper_bb")
+        # === ENTRY 3: RSI extremes ===
+        if score == 0.0:
+            if rsi_val < 25 and ema_bull:
+                score = 0.55
+                reasons.append(f"rsi_oversold:rsi={rsi_val:.0f},ema_bull")
+            elif rsi_val > 75 and ema_bear:
+                score = -0.55
+                reasons.append(f"rsi_overbought:rsi={rsi_val:.0f},ema_bear")
 
-        # 5. CSS momentum
-        if css_val > 0.5:
-            score += 0.4
-            reasons.append(f"css={css_val:+.2f}")
-        elif css_val < -0.5:
-            score -= 0.4
-            reasons.append(f"css={css_val:+.2f}")
+        # === SL/TP ===
+        sl_pct = max(self.params.sl_pct, atr_pct * 1.2)
+        tp_pct = max(self.params.tp_pct, atr_pct * 2.5, sl_pct * 3.0)
 
-        # 6. MACD histogram
-        if macd_h_val > 0 and macd_h_val > macd_h_prev:
-            score += 0.3
-            reasons.append("macd_h↑")
-        elif macd_h_val < 0 and macd_h_val < macd_h_prev:
-            score -= 0.3
-            reasons.append("macd_h↓")
-
-        # 7. Volume confirmation (повышает доверие, не меняет знак)
-        if vol_ratio > 1.5:
-            if score > 0:
-                score += 0.2
-            elif score < 0:
-                score -= 0.2
-            reasons.append(f"vol={vol_ratio:.1f}x")
-
-        # === ДЕКОД ===
         signal = "HOLD"
         side = None
-        # В clone #1 порог ниже (0.5) → больше сделок
-        if score >= 0.8:
+        confidence = 0.0
+        if score >= 0.55:
             signal = "BUY"
             side = "LONG"
-            confidence = min(0.85, 0.55 + abs(score) * 0.1)
-        elif score <= -0.8:
+            confidence = min(0.95, abs(score))
+        elif score <= -0.55:
             signal = "SELL"
             side = "SHORT"
-            confidence = min(0.85, 0.55 + abs(score) * 0.1)
-        elif abs(score) >= 0.5:
-            # Мягкий сигнал — для клона #1 это ОК (min_conf 0.5)
-            if score > 0:
-                signal = "BUY"
-                side = "LONG"
-            else:
-                signal = "SELL"
-                side = "SHORT"
-            confidence = 0.5 + abs(score) * 0.1
-        else:
-            signal = "HOLD"
-            confidence = abs(score) * 0.5
+            confidence = min(0.95, abs(score))
 
         decision = {
             "signal": signal,
             "confidence": float(confidence),
             "side": side,
             "reasoning": "; ".join(reasons) if reasons else "no_setup",
-            "stop_loss_pct": self.params.sl_pct,  # фикс 1%
-            "take_profit_pct": self.params.tp_pct,  # фикс 1%
+            "stop_loss_pct": float(sl_pct),
+            "take_profit_pct": float(tp_pct),
             "score": float(score),
-            "regime": "any",
+            "regime": "trending",
             "details": {
-                "rsi": rsi_val, "css": css_val, "bb_pos": bb_pos,
-                "vol_ratio": vol_ratio, "ch1h": ch1h, "ch6h": ch6h,
+                "rsi": rsi_val, "adx": adx_val, "expand_ratio": expand_ratio,
+                "was_squeezed": was_squeezed, "expanding": expanding,
+                "vol_ratio": vol_ratio, "macd_h": macd_h_val,
             },
         }
         return decision

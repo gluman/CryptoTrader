@@ -1,8 +1,12 @@
 """
-Clone #4 — Bollinger Squeeze Breakout PRO (для 1h BTC/ETH).
+Clone #4 — Bollinger Squeeze Breakout (v2: реалистичный фильтр).
 
-Только ликвидные пары, 1h TF, супер-строгие фильтры, R:R=3+.
-Работает в trending, не в ranging. Сделки редкие, но качественные.
+Логика:
+  - Сжатие BB (squeeze) было N баров назад → сейчас bands расширяются = breakout
+  - Направление: EMA cross + MACD + ADX
+  - Volume spike подтверждает пробой
+  - R:R = 3+ (TP=3%, SL=1%) чтобы быть прибыльным при WR 40-50%
+  - Trailing ОТКЛЮЧЁН (он портил R:R в тестах)
 """
 from __future__ import annotations
 
@@ -24,13 +28,16 @@ from .base_strategy import (
 
 
 class Clone4MeanReversionStrategy(BaseStrategy):
-    """Клон #4: BB Squeeze PRO (1h, ликвидные пары, R:R=3+)."""
+    """Клон #4: BB Squeeze Breakout v2 (реалистичный squeeze-then-expand)."""
 
     PARAMS = StrategyParams(
         name="clone4_bb_squeeze",
-        timeframe="1h",
-        symbols=["BTCUSDT", "ETHUSDT"],   # только ликвидные
-        min_confidence=0.70,
+        timeframe="15m",
+        symbols=[
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
+            "DOGEUSDT", "TONUSDT", "AVAXUSDT", "ADAUSDT",
+        ],
+        min_confidence=0.55,
         sl_pct=1.0,
         tp_pct=3.0,                 # R:R = 3
         trailing_enabled=False,
@@ -64,9 +71,20 @@ class Clone4MeanReversionStrategy(BaseStrategy):
         adx = compute_adx(highs, lows, closes, 14)
         macd_l, macd_s, macd_h = compute_macd(closes)
 
-        bb_width = float(bb_up[last] - bb_lo[last])
-        bb_width_avg = float(np.mean([bb_up[i] - bb_lo[i] for i in range(max(0, last-19), last+1)]))
-        bb_squeeze_ratio = bb_width / bb_width_avg if bb_width_avg > 0 else 1.0
+        # === Реалистичный squeeze-then-expand: проверяем squeeze 5-15 баров назад + expanding сейчас ===
+        bb_width_now = float(bb_up[last] - bb_lo[last])
+        bb_width_avg_now = float(np.mean([bb_up[i] - bb_lo[i] for i in range(max(0, last-19), last+1)]))
+        expand_ratio = bb_width_now / bb_width_avg_now if bb_width_avg_now > 0 else 1.0
+        expanding_now = expand_ratio > 1.15  # bands расширяются на 15%+
+
+        # Был ли squeeze 5-15 баров назад?
+        was_squeezed = False
+        for j in range(max(0, last - 15), max(0, last - 4)):
+            bb_w_j = float(bb_up[j] - bb_lo[j])
+            bb_w_avg_j = float(np.mean([bb_up[k] - bb_lo[k] for k in range(max(0, j-19), j+1)]))
+            if bb_w_avg_j > 0 and (bb_w_j / bb_w_avg_j) < 0.70:
+                was_squeezed = True
+                break
 
         rsi_val = float(rsi[last]) if not np.isnan(rsi[last]) else 50.0
         adx_val = float(adx[last]) if not np.isnan(adx[last]) else 0.0
@@ -80,35 +98,29 @@ class Clone4MeanReversionStrategy(BaseStrategy):
         score = 0.0
         reasons = []
 
-        # === 1. BB Squeeze: bands сузились (< 70% от средней ширины) ===
-        squeeze_active = bb_squeeze_ratio < 0.70
+        # === ENTRY: was_squeezed + expanding + volume + direction ===
+        if was_squeezed and expanding_now and vol_ratio > 1.0:
+            ema_bull = ema9[last] > ema21[last] and price > ema50[last]
+            ema_bear = ema9[last] < ema21[last] and price < ema50[last]
 
-        # === 2. Расширение bands: текущая ширина > средней (breakout в действии) ===
-        expanding = bb_squeeze_ratio > 1.0
-
-        # === 3. Volume spike: подтверждение пробоя ===
-        volume_spike = vol_ratio > 1.5
-
-        # === 4. Направление через EMA + MACD ===
-        ema_bull = ema9[last] > ema21[last] and price > ema50[last]
-        ema_bear = ema9[last] < ema21[last] and price < ema50[last]
-
-        # === ENTRY: squeeze + expanding + volume + direction ===
-        if squeeze_active and expanding and volume_spike:
-            if ema_bull and macd_h_val > 0 and macd_rising:
-                score = 0.90
-                reasons.append(f"bb_squeeze_breakout_long:sq={bb_squeeze_ratio:.2f},vol={vol_ratio:.1f}x,ema_bull,macd↑")
-            elif ema_bear and macd_h_val < 0 and not macd_rising:
-                score = -0.90
-                reasons.append(f"bb_squeeze_breakout_short:sq={bb_squeeze_ratio:.2f},vol={vol_ratio:.1f}x,ema_bear,macd↓")
-
-        # === FALLBACK: trending (ADX>20) + EMA cross + volume ===
-        if score == 0.0 and adx_val > 20 and volume_spike:
+            # LONG breakout
             if ema_bull and macd_h_val > 0:
-                score = 0.70
+                score = 0.85
+                reasons.append(f"squeeze_breakout_long:sq_exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bull,macd+")
+            # SHORT breakout
+            elif ema_bear and macd_h_val < 0:
+                score = -0.85
+                reasons.append(f"squeeze_breakout_short:sq_exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bear,macd-")
+
+        # === FALLBACK: trending (ADX>20) + volume + EMA cross ===
+        if score == 0.0 and adx_val > 20 and vol_ratio > 1.0:
+            ema_bull = ema9[last] > ema21[last] and price > ema50[last]
+            ema_bear = ema9[last] < ema21[last] and price < ema50[last]
+            if ema_bull and macd_h_val > 0:
+                score = 0.65
                 reasons.append(f"trending_long:adx={adx_val:.1f},vol={vol_ratio:.1f}x,ema_bull")
             elif ema_bear and macd_h_val < 0:
-                score = -0.70
+                score = -0.65
                 reasons.append(f"trending_short:adx={adx_val:.1f},vol={vol_ratio:.1f}x,ema_bear")
 
         # === SL/TP ===
@@ -135,11 +147,11 @@ class Clone4MeanReversionStrategy(BaseStrategy):
             "stop_loss_pct": float(sl_pct),
             "take_profit_pct": float(tp_pct),
             "score": float(score),
-            "regime": "squeeze_breakout" if squeeze_active and expanding else ("trending" if adx_val > 20 else "ranging"),
+            "regime": "squeeze_breakout" if was_squeezed and expanding_now else ("trending" if adx_val > 20 else "ranging"),
             "details": {
-                "rsi": rsi_val, "adx": adx_val, "bb_squeeze_ratio": bb_squeeze_ratio,
+                "rsi": rsi_val, "adx": adx_val, "expand_ratio": expand_ratio,
                 "atr_pct": atr_pct, "vol_ratio": vol_ratio, "macd_h": macd_h_val,
-                "squeeze_active": squeeze_active, "expanding": expanding, "volume_spike": volume_spike,
+                "was_squeezed": was_squeezed, "expanding_now": expanding_now,
             },
         }
         return decision
