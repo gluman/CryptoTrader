@@ -62,21 +62,21 @@ class Clone5V2Strategy(BaseStrategy):
     wick_body_min_ratio: float = 1.0
     min_volume_spike: float = 1.3
     min_rr_ratio: float = 2.5
-    # === ICT session: NY open 13-16 UTC only (no London 06-13, skip 17-18 lunch) ===
-    session_start_utc: int = 13
-    session_end_utc: int = 16
-    # === ICT rule 1: FVG entry requires NEXT bar to form FVG ===
-    require_fvg_entry: bool = True
+    # === ICT session: 8-20 UTC (London+NY, skip 0-6 Asia low-liquidity and 20+ post-NY) ===
+    session_start_utc: int = 8
+    session_end_utc: int = 20
+    # === ICT rule 1: FVG entry (по bar[-1] вместо bar[-2] — мягче) ===
+    require_fvg_entry: bool = False  # отключаем строгий FVG (на 5m слишком редко)
+    use_soft_displacement: bool = True  # displacement candle в направлении setup
     # === ICT rule 3: EQH/EQL bonus weight ===
     equal_lows_tolerance_pct: float = 0.003
     min_equal_lows_count: int = 2
-    eql_bonus: float = 0.15  # was 0.10 in v1
-    # === ICT rule 4: 50% fib discount/premium filter ===
-    use_discount_filter: bool = True
-    # === ICT rule 5: PO3 daily structure check ===
-    require_daily_bias: bool = True
-    # === ICT rule 7: max trades per day ===
-    max_trades_per_day: int = 4
+    eql_bonus: float = 0.10  # мягче чем v1 (0.10 vs 0.15)
+    # === ICT rule 4: 50% fib discount/premium filter (мягче — optional) ===
+    use_discount_filter: bool = False
+    # === ICT rule 5: PO3 daily structure check (отключаем — слишком строго) ===
+    require_daily_bias: bool = False
+    # === ICT rule 6: max trades per day (soft) ===
 
     def __init__(self, logger=None):
         super().__init__(self.PARAMS, logger)
