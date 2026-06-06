@@ -27,20 +27,15 @@ load_dotenv('/home/andy/CryptoTrader/.env')
 import psycopg2
 import pandas as pd
 import ccxt
-from cryptotrader_strategies.clone_5_v6 import Clone5V6Strategy
+from cryptotrader_strategies.clone_5_v7 import Clone5V7Strategy
 
 DB = dict(
     host="192.168.0.149", port=5432, database="cryptotrader",
     user="cryptotrader", password=os.environ["POSTGRES_PASSWORD"],
 )
 
-# Пары Clone5 (только те, что прошли per-pair grid с PF>1.0)
-# Per-pair grid 2026-06-06:
-#   DOGEUSDT  PF=2.54 (sl=30, sw=0.003, wb=1.0, vs=1.3)
-#   TONUSDT   PF=2.02 (sl=80, sw=0.005, wb=1.0, vs=1.3)
-#   SUIUSDT   PF=2.01 (sl=80, sw=0.005, wb=1.0, vs=1.3)
-# Исключены: XRPUSDT (no winner), ADAUSDT (0.92), AVAXUSDT (0.67), LINKUSDT (0.72), HYPEUSDT (0.98)
-SYMBOLS = ["TONUSDT", "DOGEUSDT", "SUIUSDT"]
+# Пары Clone5 v7 (топ по FULL multi-pair backtest без BSBUSDT)
+SYMBOLS = ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT", "WLDUSDT", "TONUSDT", "DOGEUSDT", "ADAUSDT"]
 TF = "5m"
 TIMEFRAME_MIN = 5
 
@@ -105,7 +100,7 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
             VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, NOW(), 'pending')
             RETURNING id
         """, (
-            'clone5_v6_market_maker_full', symbol, side, score, score,
+            'clone5_v7_market_maker_martingale', symbol, side, score, score,
             entry_price, sl_price, tp_price, sl_pct, tp_pct,
             POS_USDT, json.dumps(details, default=str),
         ))
@@ -134,7 +129,7 @@ def has_open_position(symbol: str) -> bool:
 
 def scan_once() -> int:
     """Один проход: проверить все пары, сгенерировать сигналы. Возвращает кол-во сигналов."""
-    strategy = Clone5V6Strategy()
+    strategy = Clone5V7Strategy()
     signals = 0
     print(f"\n[{datetime.now(timezone.utc).isoformat()}] Clone5 scan: {len(SYMBOLS)} pairs", flush=True)
     for sym in SYMBOLS:
