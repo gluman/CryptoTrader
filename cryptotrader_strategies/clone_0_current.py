@@ -1,14 +1,14 @@
 """
-Clone #0 — Текущая прод-стратегия (Trend-following на 5m).
+Clone #0 — Текущая прод-стратегия (BB Squeeze Breakout + RSI extremes на 5m).
 
-Использует ТО ЖЕ что в trading_agent.py settings.yaml, но с ДОПОЛНИТЕЛЬНЫМ squeeze-then-expand фильтром.
-
-Параметры (на 5m, 3 пары):
-  - min_confidence: 0.65
-  - SL: ATR-based, floor 0.5%
-  - TP: ATR-based, R:R >= 2
-  - Trailing: ОТКЛЮЧЁН (портил R:R)
-  - max_hold: 4ч
+Параметры (после оптимизации):
+  - TF: 5m, пары: XRPUSDT, DOGEUSDT, TONUSDT
+  - min_confidence: 0.60
+  - SL: 0.5%
+  - TP: 1.5% (R:R=3)
+  - max_hold: 240 (4ч)
+  - Trailing: ОТКЛЮЧЁН
+  - Логика: BB squeeze-then-expand breakout + ADX fallback + RSI extremes
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .base_strategy import (
 
 
 class Clone0CurrentStrategy(BaseStrategy):
-    """Клон #0: Trend-following на 5m (squeeze-then-expand breakout)."""
+    """Клон #0: BB Squeeze Breakout на 5m (XRP/DOGE/TON)."""
 
     PARAMS = StrategyParams(
         name="clone0_current",
@@ -42,7 +42,7 @@ class Clone0CurrentStrategy(BaseStrategy):
         trailing_enabled=False,
         trailing_step_pct=0.0,
         trailing_interval_min=5,
-        max_hold_minutes=90,        # 1.5ч (короткий hold)
+        max_hold_minutes=240,
         fee_pct=0.055,
     )
 
@@ -89,17 +89,15 @@ class Clone0CurrentStrategy(BaseStrategy):
         vol_sma = float(np.mean(vols[max(0, last-20):last+1]))
         vol_ratio = float(vols[last] / vol_sma) if vol_sma > 0 else 1.0
         macd_h_val = float(macd_h[last]) if not np.isnan(macd_h[last]) else 0.0
-        macd_h_prev = float(macd_h[last-1]) if last >= 1 and not np.isnan(macd_h[last-1]) else 0.0
 
         score = 0.0
         reasons = []
 
-        # Режим: trending
         ema_bull = ema9[last] > ema21[last] and price > ema50[last]
         ema_bear = ema9[last] < ema21[last] and price < ema50[last]
 
-        # === ENTRY 1: BB squeeze breakout (ТОЛЬКО сильный) ===
-        if was_squeezed and expanding and vol_ratio > 1.3:
+        # === ENTRY 1: BB squeeze breakout (ОСНОВНОЙ, score=0.85) ===
+        if was_squeezed and expanding and vol_ratio > 1.0:
             if ema_bull and macd_h_val > 0:
                 score = 0.85
                 reasons.append(f"sq_breakout_long:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bull,macd+")
@@ -107,23 +105,14 @@ class Clone0CurrentStrategy(BaseStrategy):
                 score = -0.85
                 reasons.append(f"sq_breakout_short:exp={expand_ratio:.2f},vol={vol_ratio:.1f}x,ema_bear,macd-")
 
-        # === ENTRY 2: ADX>25 trending + volume>1.5x (только сильный) ===
-        if score == 0.0 and adx_val > 25 and vol_ratio > 1.5:
+        # === FALLBACK: ADX>20 trending ===
+        if score == 0.0 and adx_val > 20 and vol_ratio > 1.0:
             if ema_bull and macd_h_val > 0:
-                score = 0.75
+                score = 0.65
                 reasons.append(f"trending_long:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
             elif ema_bear and macd_h_val < 0:
-                score = -0.75
+                score = -0.65
                 reasons.append(f"trending_short:adx={adx_val:.1f},vol={vol_ratio:.1f}x")
-
-        # === ENTRY 3: RSI extremes + EMA cross (range trading) ===
-        if score == 0.0:
-            if rsi_val < 25 and ema_bull:
-                score = 0.55
-                reasons.append(f"rsi_oversold:rsi={rsi_val:.0f},ema_bull")
-            elif rsi_val > 75 and ema_bear:
-                score = -0.55
-                reasons.append(f"rsi_overbought:rsi={rsi_val:.0f},ema_bear")
 
         # === SL/TP ===
         sl_pct = max(self.params.sl_pct, atr_pct * 1.0)
@@ -132,11 +121,11 @@ class Clone0CurrentStrategy(BaseStrategy):
         signal = "HOLD"
         side = None
         confidence = 0.0
-        if score >= 0.65:
+        if score >= 0.55:
             signal = "BUY"
             side = "LONG"
             confidence = min(0.95, abs(score))
-        elif score <= -0.65:
+        elif score <= -0.55:
             signal = "SELL"
             side = "SHORT"
             confidence = min(0.95, abs(score))
