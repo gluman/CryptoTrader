@@ -13,8 +13,10 @@ class SentimentAgent(BaseAgent):
     
     # Ollama fallback server
     OLLAMA_BASE = "http://192.168.0.94:11434"
-    OLLAMA_MODEL = "gemma4:e2b"
-    OLLAMA_FALLBACK = "gemma4:e2b"   # qwen3.5:9b not present on host; 26b too slow
+    # 2026-05-27 (per Boss): SAME model as TradingDecision (qwen2.5:14b) so .94 keeps exactly ONE
+    # model resident (only qwen OR granite at a time — never both, else disk swap risks crashing .94).
+    OLLAMA_MODEL = "qwen2.5:14b"
+    OLLAMA_FALLBACK = "qwen2.5:14b"   # retry same (avoid loading a 2nd model alongside)
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager):
         super().__init__('Sentiment', logger)
@@ -152,15 +154,11 @@ class SentimentAgent(BaseAgent):
 
     def analyze_sentiment(self, title: str, summary: str = '') -> float:
         """Analyze sentiment of a single news item (-1 to +1).
-        Chain: RuAPI haiku -> Ollama -> keyword fallback."""
+        Chain: Ollama -> keyword fallback. (RuAPI excluded 2026-05-27 per Boss.)"""
         prompt = (
             f"Rate the crypto market sentiment of this news from -1.0 (very bearish) to +1.0 (very bullish).\n"
             f"Title: {title}\nSummary: {summary[:200]}\nSentiment score:"
         )
-        try:
-            return max(-1.0, min(1.0, float(self._call_ruapi_sentiment(prompt))))
-        except Exception as e:
-            self.log('warning', f"RuAPI sentiment failed ({e}), trying Ollama")
         try:
             return max(-1.0, min(1.0, float(self.call_llm_ollama(prompt))))
         except Exception as e:

@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 from .base import BaseAgent
 from ..core.config import Config
@@ -18,8 +18,13 @@ class TradingDecisionAgent(BaseAgent):
     
     # Ollama fallback server
     OLLAMA_BASE = "http://192.168.0.94:11434"
-    OLLAMA_MODEL = "qwen2.5:14b"       # strong free local (Q4 ~9GB, fits 1 card); warm 4-10s, kept warm via host cron
-    OLLAMA_FALLBACK = "gemma4:e2b"     # instant 5B fallback if qwen cold/busy (granite4.1:3b also available)
+    # 2026-05-27 (per Boss): .94 has 2× 10GB cards; qwen2.5:14b is OK, BUT only ONE model may be
+    # resident at a time (either qwen OR granite, never both — else disk swap risks crashing .94).
+    # So decision AND sentiment BOTH use qwen2.5:14b → a single model stays resident, no swap.
+    # Fallback is qwen too (retry same), final fallback = rule-based. granite4.1:3b is the manual
+    # alternative if qwen ever can't load. Verified: qwen valid JSON ~5s warm.
+    OLLAMA_MODEL = "qwen2.5:14b"       # 14B, strongest local; one model resident on .94
+    OLLAMA_FALLBACK = "qwen2.5:14b"    # retry same (avoid loading a 2nd model alongside)
     
     def __init__(self, config: Config, logger: logging.Logger, db: DatabaseManager, 
                  sentiment_agent: SentimentAgent):
@@ -460,9 +465,9 @@ Set stop_loss/take_profit as actual prices with take_profit at least 2x the stop
         to `cloud` below. Dead providers removed: opencode-zen, DeepSeek, MiniMax, claude-haiku.
         """
         # 1. Cloud LLMs in priority order: (name, fn, retries)
-        cloud = [
-            ('gpt-5.4', lambda: self._call_ruapi(prompt, 'gpt-5.4'), 2),
-        ]
+        # RuAPI/gpt-5.4 EXCLUDED 2026-05-27 (per Boss) — AmazonQ monthly limit unreliable.
+        # Ollama (local, free) is now primary. _call_ruapi kept for manual re-enable.
+        cloud = []
         for name, fn, tries in cloud:
             for attempt in range(tries):
                 try:
@@ -873,7 +878,22 @@ Set stop_loss/take_profit as actual prices with take_profit at least 2x the stop
         df = self.get_ohlcv_data(symbol, exchange, timeframe)
         if df.empty:
             return {'symbol': symbol, 'signal': 'HOLD', 'reasoning': 'No data'}
-        
+
+        # 1b. Stale-data guard — real-money safety: never decide on frozen candles.
+        # DataCollector lags per-symbol (XRP/DOGE 1m fell ~15-21h behind on 2026-05-27).
+        try:
+            last_ts = df.index[-1]
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            age_min = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60.0
+            tf_min = {'1m':1,'1':1,'5m':5,'5':5,'15m':15,'15':15,'1h':60,'60':60,'4h':240,'240':240}.get(str(timeframe), 5)
+            if age_min > 3 * tf_min:
+                self.log('warning', f"{symbol}: stale data HOLD (last candle {age_min:.0f}m old > {3*tf_min}m threshold)")
+                return {'symbol': symbol, 'signal': 'HOLD', 'confidence': 0.0,
+                        'reasoning': f'stale data: last candle {age_min:.0f}m old', 'source': 'stale_guard'}
+        except Exception:
+            pass
+
         # 2. Calculate indicators
         indicators = self.calculate_indicators(df)
         if not indicators:
@@ -969,24 +989,27 @@ Set stop_loss/take_profit as actual prices with take_profit at least 2x the stop
         """Generate decisions for all active symbols - scalping mode with 1m Bybit data"""
         self.log('info', "Starting trading decision cycle (scalping mode)...")
 
-        with self.db.get_session() as session:
-            from ..core.database import SelectedSymbol
-            symbols = session.query(SelectedSymbol).filter_by(is_active=True).all()
-            symbol_names = [s.symbol for s in symbols][:10]
+        # Symbols + timeframe FROM CONFIG (trading_decision). [Fix 2026-05-27]
+        # Before: hardcoded SelectedSymbol (BTC/ETH) + timeframe='1' → read STALE '1'-format
+        # candles frozen since 23.05 (DataCollector writes '1m'), so vol_gate killed every cycle
+        # and analysis ran on pairs the executor doesn't even trade. Now matches traded pairs.
+        _td = (getattr(self.config, 'agents', {}) or {}).get('trading_decision', {})
+        symbol_names = list(_td.get('symbols') or [])
+        timeframe = _td.get('timeframe', '5m')
 
+        if not symbol_names:
+            with self.db.get_session() as session:
+                from ..core.database import SelectedSymbol
+                symbols = session.query(SelectedSymbol).filter_by(is_active=True).all()
+                symbol_names = [s.symbol for s in symbols][:10]
         if not symbol_names:
             symbol_names = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 
-        # Scalping: use Bybit 1m data for BTC/ETH/SOL
-        scalping_symbols = {'BTCUSDT', 'ETHUSDT', 'SOLUSDT'}
+        # All configured pairs are linear (Bybit) — same venue/timeframe the executor trades.
         decisions = []
         for sym in symbol_names:
             try:
-                # Use Bybit 1m for major scalping pairs, binance 1h for others
-                if sym in scalping_symbols:
-                    result = self.run_once_for_symbol(sym, exchange='bybit', timeframe='1', market_type='linear')
-                else:
-                    result = self.run_once_for_symbol(sym, exchange='binance', timeframe='60', market_type='spot')
+                result = self.run_once_for_symbol(sym, exchange='bybit', timeframe=timeframe, market_type='linear')
                 decisions.append(result)
             except Exception as e:
                 self.log('error', f"Decision failed for {sym}: {e}")
