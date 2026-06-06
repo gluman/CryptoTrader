@@ -120,6 +120,11 @@ class StrategyParams:
     contrarian_invert_threshold: float = 0.5
     contrarian_sentiment_invert: bool = False      # 3c: инвертировать по сентименту
     sentiment_bullish_threshold: float = 0.7       # retail >70% bullish → contrarian SELL
+    # Mean Reversion-специфика (clone_4):
+    adx_max: float = 25.0                          # торгуем только при ADX<=adx_max
+    rsi_oversold: float = 30.0                     # RSI<rsi_oversold → LONG
+    rsi_overbought: float = 70.0                   # RSI>rsi_overbought → SHORT
+    bb_extreme_pct: float = 0.05                   # цена в нижних bb_extreme_pct BB → extreme
 
 
 # === Базовый класс ===
