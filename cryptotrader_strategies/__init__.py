@@ -1,17 +1,19 @@
 """
-Пакет cryptotrader_strategies — 4 клона стратегий для параллельного тестирования.
+Пакет cryptotrader_strategies — 6 клонов стратегий для параллельного тестирования.
 
-Clone 0 (clone_0_current):    Текущая прод-стратегия (5m, 3 пары, conf=0.75)
-Clone 1 (clone_1_low_risk):   Low-risk 15m, 8 пар, conf=0.5, SL=TP=1%, trailing 0.1%/5min
-Clone 2 (clone_2_contrarian): 3b (invert at conf<0.5) + 3c (sentiment invert)
-Clone 3 (clone_3_stub):       TradingView webhook заглушка
+Clone 0 (clone_0_current):        Текущая BB Squeeze Breakout (5m, 3 пары, R:R=5) — В ПЛЮСЕ
+Clone 1 (clone_1_low_risk):       BB Squeeze Breakout (15m, 6 high-vol пар)
+Clone 2 (clone_2_contrarian):     3b (invert at conf<0.5) + 3c (sentiment invert)
+Clone 3 (clone_3_stub):           TradingView webhook заглушка
 Clone 4 (clone_4_mean_reversion): Mean Reversion (15m, 8 пар, ranging only, BB+RSI, R:R=2)
+Clone 5 (clone_5_market_maker):   Market Maker / Liquidity Hunt стратегия
 """
 from .clone_0_current import Clone0CurrentStrategy
 from .clone_1_low_risk import Clone1LowRiskStrategy
 from .clone_2_contrarian import Clone2ContrarianStrategy
 from .clone_3_stub import Clone3StubStrategy
 from .clone_4_mean_reversion import Clone4MeanReversionStrategy
+from .clone_5_market_maker import Clone5MarketMakerStrategy
 
 
 def get_all_strategies(logger=None):
@@ -23,6 +25,7 @@ def get_all_strategies(logger=None):
         "clone2_contrarian_3c": Clone2ContrarianStrategy(mode="3c", logger=logger),
         Clone3StubStrategy.PARAMS.name: Clone3StubStrategy(logger=logger),
         Clone4MeanReversionStrategy.PARAMS.name: Clone4MeanReversionStrategy(logger=logger),
+        Clone5MarketMakerStrategy.PARAMS.name: Clone5MarketMakerStrategy(logger=logger),
     }
 
 
@@ -32,5 +35,6 @@ __all__ = [
     "Clone2ContrarianStrategy",
     "Clone3StubStrategy",
     "Clone4MeanReversionStrategy",
+    "Clone5MarketMakerStrategy",
     "get_all_strategies",
 ]
