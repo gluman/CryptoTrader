@@ -39,6 +39,15 @@ COOLDOWN_HOURS = 24  # blackout после max losses
 PER_PAIR_EXPOSURE_CAP = 30.0  # max $ on one pair at once (3 pairs × step 2 × $5 = $30)
 
 
+# === Per-pair tuned params (from grid_v7_per_pair 2026-06-07) ===
+PER_PAIR_PARAMS_V7 = {
+    "NEARUSDT": {"swing_lookback": 120, "sweep_threshold": 0.005, "wick_body_min_ratio": 0.8},
+    "SOLUSDT":  {"swing_lookback": 50,  "sweep_threshold": 0.003, "wick_body_min_ratio": 0.8},
+    "LITUSDT":  {"swing_lookback": 50,  "sweep_threshold": 0.008, "wick_body_min_ratio": 0.8},
+    "WLDUSDT":  {"swing_lookback": 30,  "sweep_threshold": 0.008, "wick_body_min_ratio": 0.8},
+}
+
+
 @dataclass
 class MartingaleState:
     """Per-pair state для martingale + safety filters."""
@@ -131,6 +140,12 @@ class Clone5V7Strategy(Clone5V6Strategy):
             return self._hold("insufficient_data", 0.0, {})
 
         self._apply_per_pair_params(symbol)
+        # Apply per-pair v7 tuned params (overrides v6 per-pair)
+        if symbol in PER_PAIR_PARAMS_V7:
+            p = PER_PAIR_PARAMS_V7[symbol]
+            self.swing_lookback = p.get('swing_lookback', self.swing_lookback)
+            self.sweep_threshold = p.get('sweep_threshold', self.sweep_threshold)
+            self.wick_body_min_ratio = p.get('wick_body_min_ratio', self.wick_body_min_ratio)
         last = len(df) - 1
         current_ts = df.index[last]
 
