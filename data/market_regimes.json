@@ -1,0 +1,147 @@
+{
+  "version": "1.0",
+  "created": "2026-06-02",
+  "regimes": {
+    "PANIC_CRASH": {
+      "description": "Sharp selloff, extreme fear, high volume, elevated volatility",
+      "thresholds": {
+        "price_drop_72h_pct": -8.0,
+        "rsi_14_max": 30,
+        "volume_ratio_min": 3.0,
+        "atr_pct_min": 4.0,
+        "macd_hist_negative": true
+      },
+      "default_weights": {
+        "rsi_14": 0.2,
+        "macd_hist": 0.15,
+        "volume_ratio": 0.25,
+        "atr_pct": 0.15,
+        "price_vs_sma50": 0.1,
+        "bb_width": 0.05,
+        "sma_cross": 0.1
+      },
+      "action_bias": "avoid_or_short_pullback"
+    },
+    "BEAR_TREND": {
+      "description": "Sustained downtrend, RSI below 40, negative MACD, price below SMA50",
+      "thresholds": {
+        "rsi_14_max": 42,
+        "macd_hist_max": 0,
+        "price_vs_sma50_max": 0,
+        "adx_min": 20
+      },
+      "default_weights": {
+        "rsi_14": 0.18,
+        "macd_hist": 0.2,
+        "volume_ratio": 0.1,
+        "atr_pct": 0.07,
+        "price_vs_sma50": 0.2,
+        "bb_width": 0.05,
+        "sma_cross": 0.2
+      },
+      "action_bias": "short_bounces_or_avoid"
+    },
+    "RANGING": {
+      "description": "Sideways consolidation, low ADX, narrow BB, RSI 40-60",
+      "thresholds": {
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "adx_max": 25,
+        "bb_width_pct_max": 3.0,
+        "volume_ratio_max": 1.5
+      },
+      "default_weights": {
+        "rsi_14": 0.25,
+        "macd_hist": 0.1,
+        "volume_ratio": 0.15,
+        "atr_pct": 0.1,
+        "price_vs_sma50": 0.1,
+        "bb_width": 0.2,
+        "sma_cross": 0.1
+      },
+      "action_bias": "mean_reversion_range"
+    },
+    "BULL_TREND": {
+      "description": "Sustained uptrend, RSI above 55, positive MACD, price above SMA50",
+      "thresholds": {
+        "rsi_14_min": 55,
+        "macd_hist_min": 0,
+        "price_vs_sma50_min": 0,
+        "adx_min": 20
+      },
+      "default_weights": {
+        "rsi_14": 0.15,
+        "macd_hist": 0.2,
+        "volume_ratio": 0.15,
+        "atr_pct": 0.05,
+        "price_vs_sma50": 0.2,
+        "bb_width": 0.05,
+        "sma_cross": 0.2
+      },
+      "action_bias": "buy_dips_or_hold"
+    },
+    "EUPHORIA_PUMP": {
+      "description": "Parabolic rally, extreme greed, volume spike, RSI>70",
+      "thresholds": {
+        "price_rise_72h_pct": 10.0,
+        "rsi_14_min": 70,
+        "volume_ratio_min": 3.0,
+        "atr_pct_min": 3.0
+      },
+      "default_weights": {
+        "rsi_14": 0.2,
+        "macd_hist": 0.1,
+        "volume_ratio": 0.25,
+        "atr_pct": 0.15,
+        "price_vs_sma50": 0.1,
+        "bb_width": 0.05,
+        "sma_cross": 0.15
+      },
+      "action_bias": "avoid_or_short_extreme"
+    },
+    "TRANSITION": {
+      "description": "Regime change in progress, mixed signals, uncertainty",
+      "thresholds": {},
+      "default_weights": {
+        "rsi_14": 0.15,
+        "macd_hist": 0.15,
+        "volume_ratio": 0.15,
+        "atr_pct": 0.1,
+        "price_vs_sma50": 0.15,
+        "bb_width": 0.1,
+        "sma_cross": 0.2
+      },
+      "action_bias": "wait_for_confirmation"
+    }
+  },
+  "dynamic_weights": {
+    "RANGING": {
+      "rsi_14": 0.075,
+      "macd_hist": 0.361,
+      "volume_ratio": 0.261,
+      "atr_pct": 0.03,
+      "price_vs_sma50": 0.122,
+      "bb_width": 0.072,
+      "sma_cross": 0.08
+    },
+    "BEAR_TREND": {
+      "rsi_14": 0.122,
+      "macd_hist": 0.227,
+      "volume_ratio": 0.227,
+      "atr_pct": 0.148,
+      "price_vs_sma50": 0.043,
+      "bb_width": 0.061,
+      "sma_cross": 0.173
+    },
+    "BULL_TREND": {
+      "rsi_14": 0.178,
+      "macd_hist": 0.154,
+      "volume_ratio": 0.146,
+      "atr_pct": 0.109,
+      "price_vs_sma50": 0.147,
+      "bb_width": 0.044,
+      "sma_cross": 0.222
+    }
+  },
+  "last_updated": "2026-06-06T17:33:37.870718+00:00"
+}
