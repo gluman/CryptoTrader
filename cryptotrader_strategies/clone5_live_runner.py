@@ -27,7 +27,7 @@ load_dotenv('/home/andy/CryptoTrader/.env')
 import psycopg2
 import pandas as pd
 import ccxt
-from cryptotrader_strategies.clone_5_market_maker import Clone5MarketMakerStrategy
+from cryptotrader_strategies.clone_5_v6 import Clone5V6Strategy
 
 DB = dict(
     host="192.168.0.149", port=5432, database="cryptotrader",
@@ -105,7 +105,7 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
             VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, NOW(), 'pending')
             RETURNING id
         """, (
-            'clone5_market_maker', symbol, side, score, score,
+            'clone5_v6_market_maker_full', symbol, side, score, score,
             entry_price, sl_price, tp_price, sl_pct, tp_pct,
             POS_USDT, json.dumps(details, default=str),
         ))
@@ -134,7 +134,7 @@ def has_open_position(symbol: str) -> bool:
 
 def scan_once() -> int:
     """Один проход: проверить все пары, сгенерировать сигналы. Возвращает кол-во сигналов."""
-    strategy = Clone5MarketMakerStrategy()
+    strategy = Clone5V6Strategy()
     signals = 0
     print(f"\n[{datetime.now(timezone.utc).isoformat()}] Clone5 scan: {len(SYMBOLS)} pairs", flush=True)
     for sym in SYMBOLS:

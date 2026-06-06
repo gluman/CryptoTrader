@@ -16,6 +16,7 @@ from .clone_3_stub import Clone3StubStrategy
 from .clone_4_mean_reversion import Clone4MeanReversionStrategy
 from .clone_5_market_maker import Clone5MarketMakerStrategy
 from .clone_5_v2_ict import Clone5V2Strategy
+from .clone_5_v6 import Clone5V6Strategy
 
 
 def get_all_strategies(logger=None):
@@ -29,6 +30,7 @@ def get_all_strategies(logger=None):
         Clone4MeanReversionStrategy.PARAMS.name: Clone4MeanReversionStrategy(logger=logger),
         Clone5MarketMakerStrategy.PARAMS.name: Clone5MarketMakerStrategy(logger=logger),
         Clone5V2Strategy.PARAMS.name: Clone5V2Strategy(logger=logger),
+        Clone5V6Strategy.PARAMS.name: Clone5V6Strategy(logger=logger),
     }
 
 
@@ -40,5 +42,6 @@ __all__ = [
     "Clone4MeanReversionStrategy",
     "Clone5MarketMakerStrategy",
     "Clone5V2Strategy",
+    "Clone5V6Strategy",
     "get_all_strategies",
 ]
