@@ -43,8 +43,15 @@ TIMEFRAME_MIN = 5
 exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}}, )
 exchange.load_markets()
 
-# Position size
-POS_USDT = 5.0  # total per position (notional, no leverage for now)
+# Position size (динамический, обновляется compound_engine --rebalance)
+def get_pos_usdt() -> float:
+    try:
+        state = json.loads(Path('/home/andy/CryptoTrader/compound_state.json').read_text())
+        return float(state.get('current_pos_usdt', 5.0))
+    except Exception:
+        return 5.0
+
+POS_USDT = get_pos_usdt()  # будет пересчитан в scan_once()
 
 
 def get_db():
@@ -79,6 +86,7 @@ def get_ohlcv(symbol: str, lookback_bars: int = 200) -> pd.DataFrame:
 def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
                   score: float, reasoning: str, details: dict) -> int:
     """Создать запись в strategy_signals (для ExecutionAgent)."""
+    pos_usdt = get_pos_usdt()  # dynamic from compound engine
     conn = get_db()
     try:
         cur = conn.cursor()
@@ -102,11 +110,11 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
         """, (
             'clone5_v7_market_maker_martingale', symbol, side, score, score,
             entry_price, sl_price, tp_price, sl_pct, tp_pct,
-            POS_USDT, json.dumps(details, default=str),
+            pos_usdt, json.dumps(details, default=str),
         ))
         sig_id = cur.fetchone()[0]
         conn.commit()
-        print(f"  ✓ OPEN {side} {symbol} @ ${entry_price:.4f}  SL=${sl_price:.4f} TP=${tp_price:.4f}  score={score:.2f}", flush=True)
+        print(f"  ✓ OPEN {side} {symbol} @ ${entry_price:.4f}  SL=${sl_price:.4f} TP=${tp_price:.4f}  score={score:.2f}  pos=${pos_usdt:.2f}", flush=True)
         return sig_id
     finally:
         conn.close()
