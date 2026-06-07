@@ -109,17 +109,20 @@ class Clone5V7Strategy(Clone5V6Strategy):
     """Clone5 v7: V6 + Trailing Stop + Martingale-ready (state в отдельном dict)."""
 
     PARAMS = StrategyParams(
-        name="clone5_v7_market_maker_martingale",
+        name="clone5_v7_trailing_only",
         timeframe="5m",
-        symbols=["TONUSDT", "DOGEUSDT", "SUIUSDT"],
+        symbols=["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT", "WLDUSDT", "TONUSDT", "DOGEUSDT", "ADAUSDT"],
         min_confidence=0.50,
         sl_pct=0.5,
         tp_pct=2.0,
-        # === V7: Trailing ENABLED (был отключён в v6) ===
+        # === V7a: Trailing ON (главный edge, см. ablation 2026-06-07) ===
         trailing_enabled=True,
         trailing_interval_min=15,  # проверять каждые 15 мин
-        trailing_step_pct=0.30,  # активируется при +0.3% (раньше 0.5%)
-        max_hold_minutes=180,
+        trailing_step_pct=0.30,  # активируется при +0.3%
+        # === MAX_HOLD = 30min (extended grid 12 значений 7 июня 2026) ===
+        # Best PF/Sharpe, +40% PnL vs default 180, +46% Sharpe, тот же edge.
+        # Martingale v7b убыточен на всех max_hold (PF<1) — отключён, см. open_position().
+        max_hold_minutes=30,
         fee_pct=0.055,
     )
 
