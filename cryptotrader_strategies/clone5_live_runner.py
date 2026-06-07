@@ -40,7 +40,12 @@ TF = "5m"
 TIMEFRAME_MIN = 5
 
 # Exchange для live цен
-exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}}, )
+exchange = ccxt.bybit({
+    "enableRateLimit": True,
+    "options": {"defaultType": "linear"},
+    "timeout": 5000,  # 5s — Bybit иногда тормозит (recv_window 10002)
+    "recvWindow": 60000,
+})
 exchange.load_markets()
 
 # Position size (динамический, обновляется compound_engine --rebalance)
@@ -90,9 +95,13 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
     conn = get_db()
     try:
         cur = conn.cursor()
-        # Получаем текущую цену
-        ticker = exchange.fetch_ticker(f"{symbol}")
-        entry_price = ticker['last']
+        # Получаем текущую цену (с защитой от timeout)
+        try:
+            ticker = exchange.fetch_ticker(f"{symbol}")
+            entry_price = ticker['last']
+        except Exception as e:
+            print(f"  ✗ {symbol}: ticker fetch failed: {e}", flush=True)
+            return -1
         if side == 'LONG':
             sl_price = entry_price * (1 - sl_pct / 100)
             tp_price = entry_price * (1 + tp_pct / 100)
@@ -100,6 +109,9 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
             sl_price = entry_price * (1 + sl_pct / 100)
             tp_price = entry_price * (1 - tp_pct / 100)
         # Записываем сигнал
+        # NOTE: strategy_name = 'clone5_v7_trailing_only' — фактически martingale НЕ применяется
+        # в live runner (pos size берётся из compound_state.json, не из state.current_step).
+        # Backtest v7_full = v7a подтверждает: martingale мёртвый код в текущей live-конфигурации.
         cur.execute("""
             INSERT INTO strategy_signals
               (strategy_name, symbol, side, action, score, confidence,
@@ -108,7 +120,7 @@ def open_position(symbol: str, side: str, sl_pct: float, tp_pct: float,
             VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, NOW(), 'pending')
             RETURNING id
         """, (
-            'clone5_v7_market_maker_martingale', symbol, side, score, score,
+            'clone5_v7_trailing_only', symbol, side, score, score,
             entry_price, sl_price, tp_price, sl_pct, tp_pct,
             pos_usdt, json.dumps(details, default=str),
         ))
@@ -136,8 +148,16 @@ def has_open_position(symbol: str) -> bool:
 
 
 def scan_once() -> int:
-    """Один проход: проверить все пары, сгенерировать сигналы. Возвращает кол-во сигналов."""
+    """Один проход: проверить все пары, сгенерировать сигналы. Возвращает кол-во сигналов.
+
+    NOTE: Martingale state внутри strategy._get_state() живёт только в рамках
+    одного вызова scan_once() (или одного --loop инстанса). Между cron-запусками
+    state не сохраняется — каждый вызов получает свежий Clone5V7Strategy().
+    В live конфигурации martingale НЕ применяется (см. open_position(): pos size
+    берётся из compound_state.json через get_pos_usdt()).
+    """
     strategy = Clone5V7Strategy()
+    min_conf = strategy.params.min_confidence  # use param, not hardcoded
     signals = 0
     print(f"\n[{datetime.now(timezone.utc).isoformat()}] Clone5 scan: {len(SYMBOLS)} pairs", flush=True)
     for sym in SYMBOLS:
@@ -152,17 +172,20 @@ def scan_once() -> int:
         sig = decision.get('signal', 'HOLD')
         if sig == 'HOLD':
             continue
-        if decision.get('confidence', 0) < 0.50:
+        if decision.get('confidence', 0) < min_conf:
             continue
-        # Open!
-        side = decision.get('side', 'LONG' if sig == 'BUY' else 'SHORT')
+        # Side from decide(); fallback safe (treat as LONG for BUY, SHORT for SELL)
+        side = decision.get('side')
+        if side is None:
+            side = 'LONG' if sig == 'BUY' else 'SHORT'
         sl_pct = decision.get('stop_loss_pct', 0.5)
         tp_pct = decision.get('take_profit_pct', 2.0)
         score = decision.get('confidence', 0.5)
         details = decision.get('details', {})
         details['reasoning'] = decision.get('reasoning', '')
-        open_position(sym, side, sl_pct, tp_pct, score, decision.get('reasoning', ''), details)
-        signals += 1
+        sig_id = open_position(sym, side, sl_pct, tp_pct, score, decision.get('reasoning', ''), details)
+        if sig_id > 0:
+            signals += 1
     return signals
 
 

@@ -30,6 +30,7 @@ def get_balance():
             'secret': os.environ['BYBIT_API_SECRET'],
             'options': {'defaultType': 'linear'},
             'enableRateLimit': True,
+            'recvWindow': 60000,
         })
         bal = ex.fetch_balance({'type': 'linear'})
         usdt = bal.get('USDT') or {}
