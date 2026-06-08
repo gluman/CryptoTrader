@@ -78,16 +78,64 @@ class ExecutionAgent(BaseAgent):
     def _get_market_qty_step(self, symbol: str) -> float:
         """M4 helper (08.06.2026): получить qtyStep для пары через ccxt market().
 
-        Используется в execute_linear_buy/short/sell + _check_and_execute_partial_tps +
-        _bybit_market_buy_ccxt для правильного округления количества к реальному шагу Bybit
-        (DOGE=1, NEAR=0.1, SUI=0.1, многие альты=0.01).
+        ════════════════════════════════════════════════════════════════════
+        ЗАЧЕМ
+        ════════════════════════════════════════════════════════════════════
 
-        Returns: qtyStep как float (например 1.0, 0.1, 0.01). Fallback 0.01.
+        Bybit для каждой пары задаёт индивидуальный шаг количества
+        (`lotSizeFilter.qtyStep`). Хардкод `0.01` в коде исполнения — баг,
+        потому что:
+
+          • DOGEUSDT: qtyStep = 1     → 0.01 → 0.01, потом Bybit скажет
+            «too small / too much precision» и отклонит ордер (110017).
+          • NEARUSDT, SUIUSDT, LITUSDT: qtyStep = 0.1
+          • BTCUSDT, ETHUSDT, TONUSDT, SOLUSDT: qtyStep = 0.01 (тут ок)
+          • ADAUSDT, MATICUSDT, WLDUSDT: qtyStep = 1
+
+        Симптом: ордер отклоняется с 110017, partial-close TP не
+        проходит, и стратегия зависает в `position.status='OPEN'`
+        при фактическом отсутствии позиции на бирже.
+
+        ════════════════════════════════════════════════════════════════════
+        КАК
+        ════════════════════════════════════════════════════════════════════
+
+        1. Берём ccxt-инстанс Bybit (self._bybit() — singleton, time-sync
+           через bybit_safe.py).
+        2. `ccxt_b.market(symbol_ccxt)` возвращает dict с полем
+           `info.lotSizeFilter.qtyStep` (raw от Bybit V5).
+        3. Парсим `qtyStep` → float. Fallback на ccxt `precision.amount`
+           (для пар, где ccxt не достал lotSizeFilter — старые пары).
+        4. Final fallback: 0.01 (универсально совместимо с BTC/ETH/SOL).
+
+        ════════════════════════════════════════════════════════════════════
+        ПРИМЕНЯЕТСЯ В
+        ════════════════════════════════════════════════════════════════════
+
+          • execute_linear_buy:1312    — `qty = round(qty / step) * step`
+          • execute_linear_short:1465  — то же
+          • execute_linear_sell:855    — partial TP close
+          • _bybit_market_buy_ccxt:1411 — legacy ccxt-путь
+
+        Также добавлен strip trailing zeros (`0.10000 → 0.1`) для
+        совместимости с Bybit (он принимает только нормализованные
+        числа, иначе 170137).
+
+        ════════════════════════════════════════════════════════════════════
+        RETURNS
+        ════════════════════════════════════════════════════════════════════
+
+        float — qtyStep для данной пары. Например: 1.0, 0.1, 0.01.
+        Никогда не возвращает 0 или None (минимум 0.01).
+
+        См. code_review/CODE_REVIEW_2026-06-08.md, §0.4 R4.
         """
         try:
             ccxt_b = self._bybit()
             if ccxt_b is None:
                 return 0.01
+            # ccxt ждёт формат 'BASE/QUOTE:SETTLE' для linear:
+            #   DOGEUSDT → DOGE/USDT:USDT
             sym_ccxt = symbol.upper().replace('USDT', '/USDT:USDT')
             m = ccxt_b.market(sym_ccxt)
             lsf = (m.get('info', {}) or {}).get('lotSizeFilter', {})
@@ -963,12 +1011,54 @@ class ExecutionAgent(BaseAgent):
                 key = bybit.api_key; secret = bybit.api_secret
 
                 def _bybit_timestamp() -> int:
-                    """H6: всегда берём Bybit server time (ms).
+                    """H6 fix (08.06.2026, см. §0.4 R3): серверное время Bybit для подписи.
 
-                    Primary: ccxt.get_server_time() через self._bybit().
-                    Fallback: GET /v5/market/time (без подписи) — этот endpoint всегда
-                    доступен даже при 1310 quota, поскольку не считается в OHLCV-лимит.
-                    Fallback #2: local time + уже синхронизированная дельта из ccxt.
+                    ════════════════════════════════════════════════════════════════
+                    ЗАЧЕМ
+                    ════════════════════════════════════════════════════════════════
+
+                    Bybit отклоняет подписанные запросы, у которых timestamp
+                    опережает серверный более чем на recvWindow (10002). Хост
+                    srv-cryptotrader дрейфует на ~1.5s вперёд (NTP отключён,
+                    sudo у Босса). Старый «магический» fallback `-1500ms` —
+                    хрупкий: при изменении дрейфа подпись ломалась молча.
+
+                    Новая версия: 4-уровневый fallback БЕЗ магических констант,
+                    всегда стараемся получить server time.
+
+                    ════════════════════════════════════════════════════════════════
+                    СТРАТЕГИЯ (от надёжного к менее надёжному)
+                    ════════════════════════════════════════════════════════════════
+
+                    1. `ccxt.get_server_time()` через `self._bybit()`
+                       Лучший путь: ccxt сам дёрнет /v5/market/time и вернёт ms.
+                       НО: счётчик квоты 1310 (OHLCV) НЕ затрагивается здесь,
+                       но get_server_time может попасть под отдельный rate-limit.
+                       Также при проблемах с сетью может дать 503/timeout.
+
+                    2. `GET /v5/market/time` напрямую (без подписи)
+                       Публичный endpoint, всегда работает, квоты 1310 нет.
+                       Это — наша страховка: даже если ccxt сломан, мы
+                       достучимся.
+
+                    3. `ccxt.load_time_difference() + int(time.time()*1000)`
+                       ccxt внутри запомнил `delta = serverTime - localTime`
+                       при предыдущих вызовах. Возвращаем «уже скорректированное»
+                       local time. Работает даже при сетевых проблемах.
+
+                    4. `int(time.time() * 1000)` (БЕЗ коррекции)
+                       Совсем плохой fallback. Если мы здесь — значит вообще
+                       всё сломалось, и любой timestamp лучше чем ничего.
+                       Bybit почти наверняка отклонит (10002), но мы хотя бы
+                       залогируем и вернём 0 buys.
+
+                    ════════════════════════════════════════════════════════════════
+                    СМ. ТАКЖЕ
+                    ════════════════════════════════════════════════════════════════
+
+                      • bybit_safe.py:bybit_exchange() — для ccxt-путей
+                      • cryptotrader_strategies/execute_cron.py — потребитель
+                      • code_review/CODE_REVIEW_2026-06-08.md, §0.4 R3
                     """
                     # 1) ccxt.get_server_time (самый чистый путь)
                     try:

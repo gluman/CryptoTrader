@@ -1,14 +1,132 @@
 """
-Bybit safe access helpers — единая обёртка для ccxt-инициализации с time-sync.
+bybit_safe.py — единая обёртка для ccxt-инициализации с time-sync.
 
-Все скрипты (compound_engine, multi_strategy_monitor, compound_dashboard, Clone5 runner)
-должны импортировать bybit_exchange() вместо собственного ccxt.bybit({...}).
+═══════════════════════════════════════════════════════════════════════════════
+ЗАЧЕМ ЭТОТ ФАЙЛ СУЩЕСТВУЕТ
+═══════════════════════════════════════════════════════════════════════════════
 
-Зачем: код-ревью 2026-06-08 замечания H1/H5/H6.
-- Без `adjustForTimeDifference=True` + `load_time_difference()` подписанные запросы
-  падают с `retCode 10002` (timestamp mismatch).
-- Без `options.recvWindow` Bybit режет по умолчанию 5000 ms.
-- `recvWindow` верхним уровнем конструктора ccxt игнорирует (нужно внутрь options).
+История: code review `code_review/CODE_REVIEW_2026-06-08.md` выявил три
+критические/высокие проблемы, повторявшиеся в 4 разных скриптах:
+
+  H1 — compound_engine.py
+    Создавал ccxt.bybit({...}) БЕЗ `adjustForTimeDifference=True` и БЕЗ
+    `load_time_difference()`. Параметр `recvWindow=60000` передавался
+    ВЕРХНИМ уровнем конструктора ccxt.bybit({...}), но ccxt ожидает
+    `options.recvWindow` — поэтому в ошибке от Bybit приходил
+    `recv_window[5000]` (дефолт), а не 60000. Симптом: 10002
+    ("invalid request, please check your server timestamp or recv_window
+    param"), `get_bybit_balance()` всегда возвращал 0.0 → весь compound
+    механизм (tiers, pos_usdt) был мёртв.
+
+  H5 — multi_strategy_monitor.py
+    `ccxt.bybit({...})` создавался ВООБЩЕ без apiKey/secret (это был
+    забытый публичный клиент), приватный `fetch_balance` падал → `except`
+    молча возвращал `(0.0, 0.0)`. Cron-отчёт в Telegram показывал
+    "Balance: $0.00 total $0.00 free" каждый час. Вводит в заблуждение.
+
+  H6 — глобально
+    Хост srv-cryptotrader опережает сервер Bybit на ~1.5 секунды (дрейф
+    NTP отключён). Без `adjustForTimeDifference=True` все подписанные
+    запросы получают timestamp из локального `time.time()`, который
+    > server_timestamp + recvWindow → отказ 10002.
+
+═══════════════════════════════════════════════════════════════════════════════
+ПОЧЕМУ ИМЕННО ТАК, А НЕ ИНАЧЕ
+═══════════════════════════════════════════════════════════════════════════════
+
+  1. `adjustForTimeDifference=True` в `options`:
+     ccxt при создании экземпляра запоминает флаг. Перед КАЖДЫМ
+     подписанным запросом ccxt внутри вычитает сохранённую дельту из
+     `time.time()` если флаг включён. Это — единственный способ получить
+     timestamp, синхронный с сервером Bybit, без правки системных часов
+     и без sudo.
+
+  2. `ex.load_time_difference()`:
+     Явный вызов при инициализации — вычисляет разницу
+     `serverTime - localTime` по публичному эндпоинту Bybit
+     `/v5/market/time`. ccxt сохраняет её внутри. Без ЭТОГО вызова флаг
+     `adjustForTimeDifference` остаётся неинициализированным и не
+     работает (это документированный gotcha ccxt).
+
+  3. `options.recvWindow=60000`:
+     Bybit по умолчанию принимает запросы с timestamp не старше 5 секунд
+     (recv_window=5000). При дрейфе 1.5s + задержках сети в 200-500ms
+     запросы с локальным timestamp падают. 60000 ms (60s) — щедрый
+     запас. Bybit уважает `recvWindow` от клиента.
+
+  4. `defaultType: 'linear'`:
+     Bybit V5 разделяет spot / linear (USDT perpetual) / inverse /
+     option. Без явного defaultType `fetch_balance` и `fetch_ticker`
+     могут вернуть данные из другой категории (или вообще упасть
+     10001). Все наши стратегии — linear (perpetual futures на USDT).
+
+  5. `enableRateLimit=True`:
+     ccxt встроенный rate-limiter (по умолчанию Bybit = 10 req/s для
+     публичных, 5 req/s для приватных). Без него при пакетной обработке
+     (10 символов параллельно) упираемся в 429 Too Many Requests.
+
+  6. `timeout=10000`:
+     Bybit иногда отвечает по 3-5 секунд (особенно в моменты волатильности).
+     Дефолт ccxt 10000 ms оставлен, чтобы не маскировать проблемы сети
+     бесконечными зависаниями.
+
+  7. `_require_env()`:
+     Вместо `os.environ['KEY']` (KeyError + crash) — `os.environ.get(...,
+     '')` + понятный `RuntimeError` с подсказкой, что смотреть в
+     /home/andy/CryptoTrader/.env. Согласуется с замечанием L7 code
+     review: «падать с понятной ошибкой, а не с KeyError».
+
+  8. `get_usdt_balance()` возвращает (free, total):
+     Compound engine исторически ждёт пару `free, total`. Поменяли бы
+     сигнатуру — пришлось бы править 4 файла. Оставлено для совместимости.
+
+═══════════════════════════════════════════════════════════════════════════════
+ПРИМЕНЕНИЕ
+═══════════════════════════════════════════════════════════════════════════════
+
+  from cryptotrader_strategies.bybit_safe import bybit_exchange, get_usdt_balance, fetch_ticker_safe
+
+  # Приватный клиент (подписанные запросы)
+  ex = bybit_exchange(with_auth=True)
+  bal = ex.fetch_balance({'type': 'swap', 'accountType': 'UNIFIED'})
+
+  # Публичный клиент (только публичные данные)
+  ex = bybit_exchange(with_auth=False)
+  ticker = ex.fetch_ticker('BTCUSDT')
+
+  # Helper с try/except и логированием
+  free, total = get_usdt_balance()
+  ticker = fetch_ticker_safe('ETHUSDT')
+
+═══════════════════════════════════════════════════════════════════════════════
+ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ
+═══════════════════════════════════════════════════════════════════════════════
+
+  1. `adjustForTimeDifference` не поможет если `recvWindow < |delta|`.
+     При дельте 1.5s + timeout 0.5s = 2s, recvWindow=5000 должно хватить
+     в 99.9% случаев. Мы ставим 60000 для запаса.
+
+  2. Если Bybit меняет API endpoint /v5/market/time — load_time_difference
+     упадёт с connection error. Тогда fetch_balance/fetch_ticker всё равно
+     упадут (потому что они ходят на /v5/*). Дополнительной обработки
+     не нужно.
+
+  3. Bybit rate-limit 1310 (Weekly/Monthly OHLCV Limit Exhausted) — это
+     про OHLCV (свечи), а НЕ про balance/ticker/order. fetch_balance
+     и fetch_ticker не подпадают. Если в будущем Bybit введёт отдельный
+     лимит на приватные запросы — `enableRateLimit` + `recvWindow` всё
+     равно защитят.
+
+═══════════════════════════════════════════════════════════════════════════════
+СМ. ТАКЖЕ
+═══════════════════════════════════════════════════════════════════════════════
+
+  • code_review/CODE_REVIEW_2026-06-08.md, §0.4 R3 (H6 фикс)
+  • code_review/CODE_REVIEW_2026-06-08.md, §H1 (compound_engine)
+  • code_review/CODE_REVIEW_2026-06-08.md, §H5 (multi_strategy_monitor)
+  • execution_agent.py:942 — _bybit_timestamp() для ручной подписи
+    (использует тот же time-sync подход, но без ccxt)
+  • execute_cron.py — потребитель этой библиотеки (cron каждые 3 мин)
 """
 from __future__ import annotations
 
@@ -20,24 +138,32 @@ import ccxt
 
 log = logging.getLogger(__name__)
 
+# Дефолты ccxt.bybit, настроенные под наши нужды.
+# ВАЖНО: копируем dict при каждом вызове (см. bybit_exchange), иначе
+# override_recv_window утечёт между вызовами.
 _DEFAULTS = {
     "enableRateLimit": True,
     "options": {
-        "defaultType": "linear",
-        "adjustForTimeDifference": True,
-        "recvWindow": 60000,
+        "defaultType": "linear",         # USDT perpetual (все наши стратегии)
+        "adjustForTimeDifference": True,  # КРИТИЧНО для подписанных запросов
+        "recvWindow": 60000,              # 60s запас (Bybit default 5s)
     },
-    "timeout": 10000,
+    "timeout": 10000,  # 10s (Bybit иногда отвечает 3-5s в волатильности)
 }
 
 
 def _require_env() -> tuple[str, str]:
+    """Достать BYBIT_API_KEY/SECRET из env, упасть понятно если их нет.
+
+    L7 code review: было `os.environ['KEY']` → KeyError. Теперь
+    `os.environ.get('', '')` + RuntimeError с подсказкой пути.
+    """
     key = os.environ.get("BYBIT_API_KEY", "").strip()
     secret = os.environ.get("BYBIT_API_SECRET", "").strip()
     if not key or not secret:
         raise RuntimeError(
             "BYBIT_API_KEY/BYBIT_API_SECRET не заданы. "
-            "Проверь /home/andy/CryptoTrader/.env"
+            "Проверь /home/andy/CryptoTrader/.env (BYBIT_API_KEY=... BYBIT_API_SECRET=...)"
         )
     return key, secret
 
@@ -46,10 +172,28 @@ def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int
     """Возвращает сконфигурированный ccxt.bybit с time-sync.
 
     Args:
-        with_auth: если True — подставляет apiKey/secret из env. Иначе — публичный клиент.
-        override_recv_window: подменить recvWindow (для тестов / дебага).
+        with_auth: если True — подставляет apiKey/secret из env.
+            False — публичный клиент (только публичные данные:
+            tickers, orderbook, OHLCV). Приватные endpoints (balance,
+            positions, create_order) вернут ошибку аутентификации.
+        override_recv_window: подменить recvWindow (для тестов / дебага
+            конкретного запроса). Например, 5000 — чтобы воспроизвести
+            проблему с дефолтным окном Bybit.
+
+    Returns:
+        ccxt.bybit instance. Уже с вызванным `load_time_difference()` —
+        готов к первому подписанному запросу.
+
+    Raises:
+        RuntimeError: если `with_auth=True` и ключи не заданы в env.
+
+    Example:
+        >>> ex = bybit_exchange()
+        >>> bal = ex.fetch_balance({'type': 'swap', 'accountType': 'UNIFIED'})
+        >>> # bal['USDT']['free'] → float USDT available
     """
-    cfg = {k: v for k, v in _DEFAULTS.items()}
+    # Копируем дефолты чтобы override_recv_window не утекал между вызовами
+    cfg = {k: v for k, v in _DEFAULTS.items() if k != "options"}
     cfg["options"] = dict(_DEFAULTS["options"])
     if override_recv_window is not None:
         cfg["options"]["recvWindow"] = override_recv_window
@@ -58,13 +202,29 @@ def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int
         cfg["apiKey"] = key
         cfg["secret"] = secret
     ex = ccxt.bybit(cfg)
-    # КРИТИЧНО: инициализировать дельту часов ДО первого подписанного запроса
+    # КРИТИЧНО: load_time_difference() вычислит serverTime - localTime
+    # и сохранит дельту. Без ЭТОГО вызова флаг adjustForTimeDifference
+    # бесполезен — это известный gotcha ccxt.
     ex.load_time_difference()
     return ex
 
 
 def get_usdt_balance() -> tuple[float, float]:
-    """Возвращает (free, total) USDT. При ошибке — (0.0, 0.0) + лог."""
+    """Возвращает (free, total) USDT на UNIFIED linear аккаунте.
+
+    При ошибке (10002 / 1310 / network) возвращает `(0.0, 0.0)` и
+    пишет WARNING в лог — НЕ throw. Compound/монитор должны показывать
+    "0.00" а не падать.
+
+    Returns:
+        (free_usdt, total_usdt). Например (10.5, 21.85) — $10.15
+        свободно, $11.70 в открытой позиции.
+
+    Note:
+        accountType='UNIFIED' — единый аккаунт Bybit V5 (объединяет
+        spot/derivatives/options). Если у вас CLASSIC account — смените
+        на 'CONTRACT' (для linear только) или опустите параметр.
+    """
     try:
         ex = bybit_exchange(with_auth=True)
         bal = ex.fetch_balance({"type": "swap", "accountType": "UNIFIED"})
@@ -78,7 +238,21 @@ def get_usdt_balance() -> tuple[float, float]:
 
 
 def fetch_ticker_safe(symbol: str) -> Optional[dict]:
-    """Тикер с try/except. Возвращает None при ошибке."""
+    """Тикер с try/except. Возвращает None при ошибке.
+
+    Args:
+        symbol: в формате ccxt (например 'BTC/USDT:USDT' для linear,
+        'BTC/USDT' для spot). Или упрощённый 'BTCUSDT' — ccxt
+        нормализует.
+
+    Returns:
+        dict ccxt-ticker: {symbol, last, bid, ask, volume, timestamp, ...}
+        или None при ошибке.
+
+    Example:
+        >>> t = fetch_ticker_safe('BTCUSDT')
+        >>> if t: print(t['last'])
+    """
     try:
         ex = bybit_exchange(with_auth=False)
         return ex.fetch_ticker(symbol)
