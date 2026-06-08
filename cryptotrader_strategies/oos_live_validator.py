@@ -144,7 +144,7 @@ def main():
     parser.add_argument('--days', type=int, default=14)
     args = parser.parse_args()
 
-    print(f"=== OOS Live Validator (last {args.days} days) ===", flush=True)
+    print(f"=== OOS Live Validator (last {args.days} days, {now_msk_str()}) ===", flush=True)
     print(f"Expected: WR {OOS_EXPECTED['wr_pct']}%, PF {OOS_EXPECTED['pf']}, PnL ${OOS_EXPECTED['pnl_per_4w']*args.days/28:.2f} (scaled)", flush=True)
     print("-"*70, flush=True)
 
