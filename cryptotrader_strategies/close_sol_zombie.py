@@ -75,6 +75,10 @@ import os
 import sys
 from pathlib import Path
 
+# Единый timezone helper (MSK UTC+3) для отчётов Boss
+sys.path.insert(0, '/home/andy/.hermes/scripts')
+from time_utils import now_msk_str  # noqa: E402
+
 # Подгружаем .env ДО импорта bybit_safe (он читает env в _require_env)
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
@@ -131,7 +135,7 @@ def main() -> int:
                         help='Символ (default: SOLUSDT)')
     args = parser.parse_args()
 
-    print(f"=== close_sol_zombie.py — {args.symbol} ===")
+    print(f"=== close_sol_zombie.py — {args.symbol} ===  {now_msk_str()}")
     print(f"Mode: {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print()
 

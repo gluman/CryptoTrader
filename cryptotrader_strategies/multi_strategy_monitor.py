@@ -27,6 +27,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+# Единый timezone helper (MSK UTC+3) для всех отчётов Boss
+sys.path.insert(0, '/home/andy/.hermes/scripts')
+from time_utils import now_msk_str, to_msk_str, msk_iso_now, MSK  # noqa: E402
 
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
@@ -214,7 +217,7 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
     now = datetime.now(timezone.utc)
     lines = []
     lines.append(f"📊 **CryptoTrader Multi-Strategy Monitor**")
-    lines.append(f"`{now.strftime('%Y-%m-%d %H:%M UTC')}`  every 30min")
+    lines.append(f"`{now_msk_str()}`  every 30min")
     lines.append("")
 
     # 1. Bybit balance
@@ -307,7 +310,7 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
 
 
 def main():
-    print(f"=== Monitor run: {datetime.now(timezone.utc).isoformat()} ===", flush=True)
+    print(f"=== Monitor run: {msk_iso_now()} ===", flush=True)
     balance_total, balance_free, breakdown = get_balance()
     state = get_state()
     report = format_report(state, balance_total, balance_free, breakdown)
@@ -315,7 +318,7 @@ def main():
     # Also save to file for cron output collection
     out_dir = Path.home() / ".hermes/cron/output/multi_monitor"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"monitor_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+    out_file = out_dir / f"monitor_{datetime.now(MSK).strftime('%Y%m%d_%H%M')}_msk.md"
     out_file.write_text(report)
     print(f"\n✓ Saved: {out_file}", flush=True)
 

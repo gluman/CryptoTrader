@@ -170,6 +170,9 @@ from pathlib import Path
 # Подключаем корень проекта /home/andy/CryptoTrader, чтобы импорты
 # `from src.core.config import Config` работали так же, как в main.py
 sys.path.insert(0, '/home/andy/CryptoTrader')
+# Единый timezone helper (MSK UTC+3) для отчётов Boss
+sys.path.insert(0, '/home/andy/.hermes/scripts')
+from time_utils import now_msk_str, to_msk_str, msk_iso_now  # noqa: E402
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
 
@@ -285,7 +288,8 @@ def main() -> int:
         # Ключи подобраны так, чтобы монитор и человек читали одинаково.
         summary = {
             "status": "ok",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": msk_iso_now(),
+            "ts_msk": now_msk_str(),
             "duration_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
             "buys": result.get('buys_executed', 0),
             "sells": result.get('sells_executed', 0),
@@ -321,7 +325,8 @@ def main() -> int:
         error_summary = {
             "status": "error",
             "error": str(e),
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": msk_iso_now(),
+            "ts_msk": now_msk_str(),
         }
         print(json.dumps(error_summary, indent=2), flush=True)
         return 1

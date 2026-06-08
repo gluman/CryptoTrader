@@ -74,6 +74,10 @@ import os
 import sys
 from datetime import datetime, timezone
 
+# Единый timezone helper (MSK UTC+3) для отчётов Boss
+sys.path.insert(0, '/home/andy/.hermes/scripts')
+from time_utils import now_msk_str, to_msk_str  # noqa: E402
+
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
 
@@ -111,7 +115,7 @@ def main() -> int:
                         help='Отменить конкретный orderId (default: все)')
     args = parser.parse_args()
 
-    print(f"=== cancel_pending_orders.py ===")
+    print(f"=== cancel_pending_orders.py ===  {now_msk_str()}")
     print(f"Mode: {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print(f"Filter: symbol={args.symbol or 'ALL'}, order_id={args.order_id or 'ALL'}")
     print()

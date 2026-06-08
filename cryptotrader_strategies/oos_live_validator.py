@@ -11,6 +11,10 @@ import os, sys, json, argparse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# Единый timezone helper (MSK UTC+3) для отчётов Boss
+sys.path.insert(0, '/home/andy/.hermes/scripts')
+from time_utils import now_msk_str, msk_iso_now  # noqa: E402
+
 sys.path.insert(0, '/home/andy/CryptoTrader')
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
@@ -118,7 +122,7 @@ def emit_alert(metrics, drifts, days):
         alerts.append(f"{len(drifts)} drift(s) > {DRIFT_THRESHOLD*100:.0f}%")
     if alerts:
         # Формируем ALERT-сообщение для Telegram
-        print(f"\n🚨 OOS ALERT ({days}d):", flush=True)
+        print(f"\n🚨 OOS ALERT ({days}d, {now_msk_str()}):", flush=True)
         for a in alerts:
             print(f"   • {a}", flush=True)
         # Машино-читаемый JSON для парсинга (последняя строка stdout)
