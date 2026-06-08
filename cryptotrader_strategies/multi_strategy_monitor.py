@@ -44,19 +44,102 @@ STRATEGIES = ["clone5_v7_trailing_only"]  # 08.06.2026: v6/v2 отключены
 
 
 def get_balance() -> tuple:
+    """
+    Возвращает (total_wallet, available, breakdown_dict).
+
+    Boss 08.06.2026 15:55 спросил: «почему только $12.42 свободно?». Ответ —
+    нужен breakdown, потому что total ($21.21) минус available ($11.62) =
+    $9.58 «заморожено». Без breakdown невозможно понять, откуда разница.
+
+    breakdown_dict содержит:
+      initial_margin    — залог в открытых позициях
+      maintenance_margin — поддерживающая маржа
+      perp_upl          — unrealized PnL
+      pending_orders_n  — кол-во открытых лимитных ордеров
+      pending_orders_margin — сколько блокируют pending ордера
+      borrow_usdc       — позаимствованный USDC (отрицательный equity)
+      frozen_remainder  — что не распределено по bucket'ам
+    """
     try:
         from cryptotrader_strategies.bybit_safe import bybit_exchange
         ex = bybit_exchange(with_auth=True)
-        bal = ex.fetch_balance({'accountType': 'UNIFIED'})
-        usdt = bal.get('USDT') or {}
-        free = float(usdt.get('free', 0.0) or 0.0)
-        total = float(usdt.get('total', 0.0) or 0.0)
-        return total, free
+        # 1) Wallet balance (unified account)
+        wb = ex.request('/v5/account/wallet-balance', 'private', 'GET', {
+            'accountType': 'UNIFIED',
+        })
+        wb_result = (wb or {}).get('result') or {}
+        wb_list = wb_result.get('list') or []
+        acc = wb_list[0] if wb_list else {}
+        # Bybit semantics: totalInitialMargin = initial margin of OPEN POSITIONS
+        # (НЕ включает pending orders margin). Pending orders резервируют
+        # risk-limit, и это видно через разницу (total - available - IM - MM).
+        # Поэтому frozen_remainder = locked - IM - MM будет включать pending
+        # margin + frozen funds. Помечаем это в breakdown.
+        total = float(acc.get('totalWalletBalance', 0) or 0)
+        available = float(acc.get('totalAvailableBalance', 0) or 0)
+        im = float(acc.get('totalInitialMargin', 0) or 0)
+        mm = float(acc.get('totalMaintenanceMargin', 0) or 0)
+        upl = float(acc.get('totalPerpUPL', 0) or 0)
+        # 2) Open orders (regular, может блокировать margin через risk limit)
+        try:
+            orders = ex.request('/v5/order/realtime', 'private', 'GET', {
+                'category': 'linear', 'settleCoin': 'USDT', 'limit': 50,
+            }).get('result', {}).get('list', [])
+        except Exception:
+            orders = []
+        # 3) Per-coin: USDC borrow
+        borrow_usdc = 0.0
+        for c in acc.get('coin', []):
+            if c.get('coin') == 'USDC':
+                borrow_usdc = float(c.get('borrowAmount', 0) or 0)
+                break
+        # 4) Заморожено в pending-ордерах (грубая оценка: notional/leverage)
+        #    Bybit не возвращает точный "locked by pending orders" — считаем
+        #    через sum(qty*price/lev) с поправкой. Это эвристика.
+        #    ВАЖНО: pending-margin ВКЛЮЧЁН в frozen_remainder, потому что Bybit
+        #    не выделяет его отдельной строкой в wallet-balance. Поэтому в
+        #    breakdown мы показываем pending_margin как ИНФОРМАТИВНУЮ метрику,
+        #    но в арифметике не вычитаем (иначе frozen_remainder будет фейк
+        #    отрицательным).
+        pending_margin = 0.0
+        for o in orders:
+            if o.get('reduceOnly') == 'true' or o.get('reduceOnly') is True:
+                continue  # reduce-only не блокирует новую маржу
+            try:
+                qty = float(o.get('qty', 0))
+                price = float(o.get('price', 0) or 0)
+                lev = float(o.get('leverage', 1) or 1)
+                if price > 0 and lev > 0:
+                    pending_margin += (qty * price) / lev
+            except (ValueError, TypeError):
+                continue
+        # 5) Remainder (pending orders margin + frozen funds + pending withdraw)
+        locked_total = total - available
+        # IM и MM — это маржа **открытых позиций**. Pending orders margin
+        # **не включены** в IM, но сидят в разнице locked_total - IM - MM.
+        frozen_remainder = locked_total - im - mm
+        return total, available, {
+            'initial_margin': im,
+            'maintenance_margin': mm,
+            'perp_upl': upl,
+            'pending_orders_n': len(orders),
+            'pending_orders_margin': pending_margin,
+            'borrow_usdc': borrow_usdc,
+            'frozen_remainder': frozen_remainder,
+        }
     except Exception as e:
         # Логируем ошибку, а не молча возвращаем нули (code review H5)
         import logging
         logging.getLogger(__name__).warning('get_balance failed: %s', e)
-        return 0.0, 0.0
+        return 0.0, 0.0, {
+            'initial_margin': 0.0,
+            'maintenance_margin': 0.0,
+            'perp_upl': 0.0,
+            'pending_orders_n': 0,
+            'pending_orders_margin': 0.0,
+            'borrow_usdc': 0.0,
+            'frozen_remainder': 0.0,
+        }
 
 
 def get_state():
@@ -122,8 +205,12 @@ def get_state():
     }
 
 
-def format_report(state, balance_total, balance_free) -> str:
-    """Telegram-friendly markdown report."""
+def format_report(state, balance_total, balance_free, breakdown=None) -> str:
+    """Telegram-friendly markdown report.
+
+    breakdown (dict) — поле из get_balance(). Если None, показываем только
+    total/free без расшифровки (для обратной совместимости).
+    """
     now = datetime.now(timezone.utc)
     lines = []
     lines.append(f"📊 **CryptoTrader Multi-Strategy Monitor**")
@@ -131,7 +218,38 @@ def format_report(state, balance_total, balance_free) -> str:
     lines.append("")
 
     # 1. Bybit balance
-    lines.append(f"💰 **Balance**: ${balance_total:.2f} total  ${balance_free:.2f} free")
+    locked = balance_total - balance_free
+    lines.append(f"💰 **Balance**: ${balance_total:.2f} total  ${balance_free:.2f} free  "
+                 f"({locked:.2f} locked)")
+    # 1a. Locked breakdown (Новое: отвечает «куда делись деньги?», Boss 08.06.2026 15:55)
+    # Account mode: REGULAR_MARGIN (см. /v5/account/info → marginMode).
+    # В REGULAR_MARGIN totalInitialMargin ВКЛЮЧАЕТ в себя:
+    #   - maintenance margin
+    #   - pending orders margin (резервирование под risk limit)
+    #   - unrealised losses (если они превышают available)
+    # Поэтому показываем IM как «общий залог», а MM НЕ показываем отдельно.
+    if breakdown and (locked > 0.01 or breakdown.get('pending_orders_n', 0) > 0
+                      or breakdown.get('borrow_usdc', 0) > 0):
+        im = breakdown.get('initial_margin', 0)
+        upl = breakdown.get('perp_upl', 0)
+        pon = breakdown.get('pending_orders_n', 0)
+        pom = breakdown.get('pending_orders_margin', 0)
+        borrow = breakdown.get('borrow_usdc', 0)
+        rest = breakdown.get('frozen_remainder', 0)
+        lines.append(f"   📦 **Locked breakdown** (REGULAR_MARGIN):")
+        if im > 0.001:
+            lines.append(f"      • Total margin (IM+MM+pending): ${im:.4f}")
+        if pon > 0:
+            lines.append(f"      • ↳ из них pending orders:    {pon} шт → ${pom:.4f} (est.)")
+        if borrow > 0.001:
+            lines.append(f"      • Borrow (USDC):     ${borrow:.4f}  ⚠️ начисляется %")
+        if abs(rest) > 0.01:
+            # rest = locked - IM. Должен быть 0 в идеале. Если > 0, значит
+            # есть frozen funds / pending withdraw / bonus deductions.
+            lines.append(f"      • Frozen/прочее:     ${rest:+.4f}")
+        if upl != 0:
+            sign = "+" if upl >= 0 else ""
+            lines.append(f"      • Perp uPnL:         {sign}${upl:.4f}  (не входит в locked)")
     if state["compound"]:
         c = state["compound"]
         lines.append(f"   Tier: {c.get('tier','?')}  Pos: ${c.get('current_pos_usdt', 0):.2f}  "
@@ -190,9 +308,9 @@ def format_report(state, balance_total, balance_free) -> str:
 
 def main():
     print(f"=== Monitor run: {datetime.now(timezone.utc).isoformat()} ===", flush=True)
-    balance_total, balance_free = get_balance()
+    balance_total, balance_free, breakdown = get_balance()
     state = get_state()
-    report = format_report(state, balance_total, balance_free)
+    report = format_report(state, balance_total, balance_free, breakdown)
     print(report, flush=True)
     # Also save to file for cron output collection
     out_dir = Path.home() / ".hermes/cron/output/multi_monitor"
