@@ -162,8 +162,10 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Подключаем корень проекта /home/andy/CryptoTrader, чтобы импорты
 # `from src.core.config import Config` работали так же, как в main.py
@@ -180,10 +182,87 @@ logging.basicConfig(
 log = logging.getLogger('execute_cron')
 
 
+# === Circuit Breaker для Bybit 1310 (rate limit) ===
+# [Fix 2026-06-08 16:10 Boss: «cron-исполнитель 1310 errors каждый 3 мин»]
+# Если в течение CB_WINDOW_SECONDS подряд 3+ ошибок содержат "1310" или
+# "rate limit" — пропускаем следующие CB_COOLDOWN_SECONDS секунд, чтобы
+# не молотить API впустую. State хранится в /tmp/.ct_cb_1310.json (per-process,
+# по сути per-cron-tick, т.к. cron каждый раз поднимает новый процесс —
+# поэтому реальный cooldown держим на стороне файла).
+CB_STATE_PATH = Path('/tmp/.ct_cb_1310.json')
+CB_WINDOW_SECONDS = 300         # 5 мин окно для подсчёта
+CB_THRESHOLD_ERRORS = 3         # 3 ошибки в окне → open breaker
+CB_COOLDOWN_SECONDS = 1800      # 30 мин cooldown если open
+
+
+def _cb_load():
+    """Загрузить state CB. Возвращает dict {window: [ts1, ts2, ...], open_until: epoch_or_0}."""
+    try:
+        if CB_STATE_PATH.exists():
+            return json.loads(CB_STATE_PATH.read_text())
+    except Exception:
+        pass
+    return {"window": [], "open_until": 0}
+
+
+def _cb_save(state):
+    try:
+        CB_STATE_PATH.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def _cb_should_skip(state, err_msg: str) -> bool:
+    """Проверить, нужно ли skip тик. Если да — обновить state."""
+    now = time.time()
+    msg = (err_msg or '').lower()
+    is_1310 = ('1310' in msg) or ('rate limit' in msg) or ('too many visits' in msg)
+    # Если breaker уже open и cooldown не истёк → skip
+    if state.get('open_until', 0) > now:
+        return True
+    if is_1310:
+        # Добавляем текущую ошибку в окно
+        window = [t for t in state.get('window', []) if now - t < CB_WINDOW_SECONDS]
+        window.append(now)
+        state['window'] = window
+        if len(window) >= CB_THRESHOLD_ERRORS:
+            state['open_until'] = now + CB_COOLDOWN_SECONDS
+            log.warning(
+                f"CircuitBreaker OPEN: {len(window)} 1310-errors in "
+                f"{CB_WINDOW_SECONDS}s. Cooldown {CB_COOLDOWN_SECONDS}s."
+            )
+        _cb_save(state)
+    return False
+
+
+def _cb_reset():
+    """Сбросить state (вызывать при успешном тике)."""
+    if CB_STATE_PATH.exists():
+        try:
+            CB_STATE_PATH.unlink()
+        except Exception:
+            pass
+
+
 def main() -> int:
     """Один цикл исполнения. Возвращает exit code (0=ok, 1=error)."""
     started = datetime.now(timezone.utc)
     log.info(f"=== Execute tick: {started.isoformat()} ===")
+
+    # Circuit breaker check
+    cb_state = _cb_load()
+    if cb_state.get('open_until', 0) > time.time():
+        remaining = int(cb_state['open_until'] - time.time())
+        skip_msg = {
+            "status": "skipped",
+            "reason": "circuit_breaker_open",
+            "retry_in_seconds": remaining,
+            "ts": started.isoformat(),
+        }
+        log.info(f"CB open, skip tick (retry in {remaining}s)")
+        print(json.dumps(skip_msg, indent=2), flush=True)
+        return 0
+
     try:
         from src.core.config import Config
         from src.core.database import DatabaseManager
@@ -220,12 +299,24 @@ def main() -> int:
             f"sl_tp={summary['sl_tp']} cleaned={summary['cleaned']} "
             f"errors={summary['errors']} dur={summary['duration_s']}s"
         )
+        # Успех → сброс CB
+        _cb_reset()
         print(json.dumps(summary, indent=2), flush=True)
         return 0
     except Exception as e:
-        # Любая ошибка (Config/DB/ExecutionAgent) → status=error.
-        # НЕ raise — чтобы cron записал FAILED в "## Error", но
-        # процесс завершился штатно (без дампа).
+        # Проверить, является ли ошибка 1310
+        if _cb_should_skip(cb_state, str(e)):
+            remaining = int(cb_state.get('open_until', 0) - time.time())
+            skip_msg = {
+                "status": "skipped",
+                "reason": "circuit_breaker_open_after_1310",
+                "retry_in_seconds": remaining,
+                "ts": started.isoformat(),
+            }
+            log.warning(f"1310 detected — CB now open for {remaining}s")
+            print(json.dumps(skip_msg, indent=2), flush=True)
+            return 0
+        # Другая ошибка (не 1310) → status=error, НЕ raise
         log.exception(f"Execute tick failed: {e}")
         error_summary = {
             "status": "error",

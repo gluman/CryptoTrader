@@ -89,6 +89,51 @@ def check_drift(live, expected, period_days=14):
     return drifts
 
 
+# === Авто-алерт при плохих показателях (R6 fix 2026-06-08) ===
+# [Boss 2026-06-08 16:15: «OOS Validator 23:00 daily — ок, но результаты не смотрим.
+# Если validator падает 3+ дней подряд, никто не замечает. Добавь alert при
+# oop_pf < 1.0 или trades < 3 за неделю».]
+# Здесь формируем структурированный alert для cron (no_agent=True доставляет
+# stdout в Telegram если deliver=telegram:519881679). Сам скрипт остаётся
+# молчаливым при зелёном, говорит только когда есть проблема.
+
+ALERT_PF_FLOOR = 1.0       # PF ниже — убыточно
+ALERT_TRADES_MIN = 3        # меньше 3 сделок за период — стат. незначимо
+
+
+def emit_alert(metrics, drifts, days):
+    """Финальный вывод. Cron доставит stdout в Telegram.
+    Структура: всегда одна JSON-строка в конце + free-form text выше.
+    Если всё ок — без JSON (silent), чтобы не спамить.
+    """
+    if metrics is None:
+        # Нет сделок — может быть и норм (v7 недавно стартовала)
+        return
+    alerts = []
+    if metrics['pf'] < ALERT_PF_FLOOR:
+        alerts.append(f"PF {metrics['pf']:.2f} < {ALERT_PF_FLOOR} (убыточно)")
+    if metrics['trades'] < ALERT_TRADES_MIN:
+        alerts.append(f"Trades {metrics['trades']} < {ALERT_TRADES_MIN} (стат. незначимо)")
+    if drifts:
+        alerts.append(f"{len(drifts)} drift(s) > {DRIFT_THRESHOLD*100:.0f}%")
+    if alerts:
+        # Формируем ALERT-сообщение для Telegram
+        print(f"\n🚨 OOS ALERT ({days}d):", flush=True)
+        for a in alerts:
+            print(f"   • {a}", flush=True)
+        # Машино-читаемый JSON для парсинга (последняя строка stdout)
+        import json as _json
+        print(_json.dumps({
+            "alert": True,
+            "pf": metrics['pf'],
+            "trades": metrics['trades'],
+            "wr_pct": metrics['wr_pct'],
+            "pnl_usd": metrics['pnl_usd'],
+            "reasons": alerts,
+            "days": days,
+        }), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--alert', action='store_true')
@@ -134,6 +179,9 @@ def main():
     for er, st in sorted(exit_stats.items(), key=lambda x: -x[1]['n']):
         wr = sum(1 for t in trades if t[3] == er and (t[2] or 0) > 0) / st['n'] * 100 if st['n'] > 0 else 0
         print(f"  {er:<15}  n={st['n']:>3}  WR={wr:>5.1f}%  PnL=${st['pnl']:+.2f}", flush=True)
+
+    # Авто-алерт (R6 fix)
+    emit_alert(metrics, drifts, args.days)
 
     return metrics, drifts
 
