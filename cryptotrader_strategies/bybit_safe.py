@@ -181,9 +181,27 @@ def _require_env() -> tuple[str, str]:
 
 
 def _is_testnet() -> bool:
-    """True если BYBIT_TESTNET=true/false/1 (case-insensitive)."""
-    val = os.environ.get("BYBIT_TESTNET", "false").strip().lower()
-    return val in ("true", "1", "yes", "on")
+    """True если BYBIT_ENV=testnet ИЛИ BYBIT_TESTNET=true (legacy alias).
+
+    Соответствует официальной конвенции Bybit Trading Skill v1.4.2:
+    https://raw.githubusercontent.com/bybit-exchange/skills/main/SKILL.md
+    → "Step 2: Configure Credentials" — `export BYBIT_ENV="testnet" # or "mainnet"`.
+
+    Поддерживаем обе формы:
+      • `BYBIT_ENV=testnet`  — официальная (skill v1.4.2+)
+      • `BYBIT_TESTNET=true` — наша внутренняя (для обратной совместимости
+        с существующими cron'ами и `.env` где BYBIT_TESTNET уже задан)
+    """
+    env = os.environ.get("BYBIT_ENV", "").strip().lower()
+    if env in ("testnet", "demo"):
+        return True
+    if env in ("mainnet", "prod", "production", ""):
+        # Если BYBIT_ENV=mainnet — не смотрим на legacy
+        if env == "mainnet":
+            return False
+    # Legacy BYBIT_TESTNET (true/false/1/0)
+    legacy = os.environ.get("BYBIT_TESTNET", "false").strip().lower()
+    return legacy in ("true", "1", "yes", "on")
 
 
 def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int] = None) -> ccxt.bybit:

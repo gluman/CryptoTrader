@@ -90,8 +90,12 @@ TIMEFRAME = "5m"
 
 
 def get_exchange():
-    """ccxt.bybit с sandbox=True (TestNet) если BYBIT_TESTNET=true."""
-    is_testnet = os.environ.get("BYBIT_TESTNET", "false").lower() in ("true", "1", "yes")
+    """ccxt.bybit с sandbox=True (TestNet) если BYBIT_ENV=testnet или BYBIT_TESTNET=true."""
+    # Совместимость с официальным Bybit Trading Skill v1.4.2
+    # https://raw.githubusercontent.com/bybit-exchange/skills/main/SKILL.md
+    env_val = os.environ.get("BYBIT_ENV", "").strip().lower()
+    is_testnet = env_val in ("testnet", "demo") or \
+                 os.environ.get("BYBIT_TESTNET", "false").lower() in ("true", "1")
     cfg = {
         "enableRateLimit": True,
         "options": {
@@ -103,9 +107,12 @@ def get_exchange():
     }
     if is_testnet:
         cfg["sandbox"] = True
-        # TestNet ключи (если есть)
-        api_key = os.environ.get("BYBIT_TESTNET_API_KEY", "").strip()
-        api_secret = os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip()
+        # TestNet ключи (если есть). Поддерживаем BYBIT_TESTNET_API_KEY
+        # и официальный BYBIT_API_KEY с префиксом "testing" (auto-detect в skill)
+        api_key = (os.environ.get("BYBIT_TESTNET_API_KEY", "").strip() or
+                   os.environ.get("BYBIT_API_KEY", "").strip())
+        api_secret = (os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip() or
+                      os.environ.get("BYBIT_API_SECRET", "").strip())
         if api_key and api_secret:
             cfg["apiKey"] = api_key
             cfg["secret"] = api_secret
