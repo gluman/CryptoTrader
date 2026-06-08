@@ -157,15 +157,33 @@ def _require_env() -> tuple[str, str]:
 
     L7 code review: было `os.environ['KEY']` → KeyError. Теперь
     `os.environ.get('', '')` + RuntimeError с подсказкой пути.
+
+    Если `BYBIT_TESTNET=true`, берёт BYBIT_TESTNET_API_KEY/SECRET
+    (отдельные ключи для testnet.bybit.com). Это позволяет параллельно
+    держать mainnet + testnet конфиги без перезаписи основных.
     """
-    key = os.environ.get("BYBIT_API_KEY", "").strip()
-    secret = os.environ.get("BYBIT_API_SECRET", "").strip()
+    is_testnet = _is_testnet()
+    if is_testnet:
+        key = os.environ.get("BYBIT_TESTNET_API_KEY", "").strip()
+        secret = os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip()
+        env_hint = "BYBIT_TESTNET_API_KEY/BYBIT_TESTNET_API_SECRET"
+    else:
+        key = os.environ.get("BYBIT_API_KEY", "").strip()
+        secret = os.environ.get("BYBIT_API_SECRET", "").strip()
+        env_hint = "BYBIT_API_KEY/BYBIT_API_SECRET"
     if not key or not secret:
         raise RuntimeError(
-            "BYBIT_API_KEY/BYBIT_API_SECRET не заданы. "
-            "Проверь /home/andy/CryptoTrader/.env (BYBIT_API_KEY=... BYBIT_API_SECRET=...)"
+            f"{env_hint} не заданы. "
+            f"Проверь /home/andy/CryptoTrader/.env "
+            f"(testnet={'true' if is_testnet else 'false'})"
         )
     return key, secret
+
+
+def _is_testnet() -> bool:
+    """True если BYBIT_TESTNET=true/false/1 (case-insensitive)."""
+    val = os.environ.get("BYBIT_TESTNET", "false").strip().lower()
+    return val in ("true", "1", "yes", "on")
 
 
 def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int] = None) -> ccxt.bybit:
@@ -187,6 +205,13 @@ def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int
     Raises:
         RuntimeError: если `with_auth=True` и ключи не заданы в env.
 
+    TestNet:
+        Если `BYBIT_TESTNET=true` в env, `bybit_exchange` автоматически:
+        1. Берёт `BYBIT_TESTNET_API_KEY/SECRET` вместо `BYBIT_API_KEY/SECRET`
+        2. Передаёт `sandbox=True` в ccxt (URL → https://api-testnet.bybit.com)
+        Это позволяет одной командой переключать mainnet ↔ testnet
+        без правки кода. Подходит для E2E-тестов виртуальных сделок.
+
     Example:
         >>> ex = bybit_exchange()
         >>> bal = ex.fetch_balance({'type': 'swap', 'accountType': 'UNIFIED'})
@@ -201,6 +226,12 @@ def bybit_exchange(*, with_auth: bool = True, override_recv_window: Optional[int
         key, secret = _require_env()
         cfg["apiKey"] = key
         cfg["secret"] = secret
+    # TestNet: переключаем endpoint через ccxt `sandbox=True`.
+    # Это работает в ccxt для Bybit — он подставит api-testnet.bybit.com.
+    # Без этого будут уходить запросы на mainnet и аутентификация упадёт.
+    if _is_testnet():
+        cfg["sandbox"] = True
+        log.info("bybit_exchange: TESTNET mode (sandbox=True)")
     ex = ccxt.bybit(cfg)
     # КРИТИЧНО: load_time_difference() вычислит serverTime - localTime
     # и сохранит дельту. Без ЭТОГО вызова флаг adjustForTimeDifference

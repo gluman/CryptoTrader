@@ -1,14 +1,20 @@
 {
-  "current_pos_usdt": 5,
-  "last_balance": 10.12990098,
-  "last_update": "2026-06-08T12:06:33.554673+00:00",
-  "tier": "starter",
+  "current_pos_usdt": 7,
+  "last_balance": 21.17864684,
+  "last_update": "2026-06-08T18:12:03.576700+00:00",
+  "tier": "tier1",
   "history": [
     {
       "ts": "2026-06-08T12:06:33.554642+00:00",
       "balance": 10.12990098,
       "pos_usdt": 5,
       "tier": "starter"
+    },
+    {
+      "ts": "2026-06-08T18:12:03.576668+00:00",
+      "balance": 21.17864684,
+      "pos_usdt": 7,
+      "tier": "tier1"
     }
   ]
 }
