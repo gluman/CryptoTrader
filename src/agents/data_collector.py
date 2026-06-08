@@ -121,12 +121,15 @@ class DataCollectorAgent(BaseAgent):
         # regardless of the volume/volatility filter. Otherwise on a quiet market XRP/DOGE/TON
         # drop out of selection, their candles go stale, and the decision stale-guard skips them
         # (XRP fell 15h behind, DOGE 21h on 2026-05-27). [Fix 2026-05-27]
+        # [Fix 2026-06-08 15:35 Boss: «почему v7a ждёт 10.06?»] — must_haves добавлялись
+        # в КОНЕЦ списка и обрезались `[:30]` ниже в основном loop, поэтому LITUSDT
+        # (low-vol, not in top-30 movers) не попадал в выборку. Теперь must_haves идут
+        # В НАЧАЛО и помечены отдельным срезом `[:max_n + len(must_haves)]` в collect-фазе.
         _td = (getattr(self.config, 'agents', {}) or {}).get('trading_decision', {})
         must_haves = list(_td.get('symbols') or []) + ['BTCUSDT', 'ETHUSDT']
-        for must_have in must_haves:
-            if must_have not in selected:
-                selected.insert(0, must_have)
-        return selected[:max_n + len(must_haves)]
+        # Дедупликация и приоритизация must_haves (они в начало)
+        ordered = list(dict.fromkeys(must_haves + selected))  # preserve order, dedup
+        return ordered[:max_n + len(must_haves)]
 
     def fetch_bybit_tickers(self) -> List[Dict]:
         """Fetch all tickers from Bybit for symbol selection"""
@@ -302,7 +305,14 @@ class DataCollectorAgent(BaseAgent):
         timeframes_bybit = ['1m', '5m', '15m', '1h', '4h']
 
         rl_errors_in_row = 0
-        for symbol in symbols[:30]:
+        # [Fix 2026-06-08 15:35 Boss: «почему v7a ждёт 10.06?»] — было `symbols[:30]`,
+        # что обрезало must_haves (LITUSDT и др. low-vol пары). Теперь collect проходит
+        # ВСЕ выбранные символы (max_n + len(must_haves) = 30 + 9 = 39).
+        _td_for_loop = (getattr(self.config, 'agents', {}) or {}).get('trading_decision', {})
+        _must_haves_for_loop = list(_td_for_loop.get('symbols') or []) + ['BTCUSDT', 'ETHUSDT']
+        _max_n_for_loop = int(self.config.selection_criteria.get('max_symbols', 30))
+        collect_limit = _max_n_for_loop + len(_must_haves_for_loop)
+        for symbol in symbols[:collect_limit]:
             for tf in timeframes_bybit:
                 self.log('info', f"Fetching {symbol} {tf} from Bybit...")
                 try:
