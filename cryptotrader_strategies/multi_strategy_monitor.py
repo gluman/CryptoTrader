@@ -36,26 +36,26 @@ import ccxt
 
 DB = dict(
     host="192.168.0.149", port=5432, database="cryptotrader",
-    user="cryptotrader", password=os.environ["POSTGRES_PASSWORD"],
+    user="cryptotrader", password=os.environ.get("POSTGRES_PASSWORD", ""),
 )
 STATE_PATH = Path('/home/andy/CryptoTrader/compound_state.json')
 
-STRATEGIES = ["clone5_v7_trailing_only", "clone5_v6_market_maker_full", "clone5_v2_market_maker_ict"]
+STRATEGIES = ["clone5_v7_trailing_only"]  # 08.06.2026: v6/v2 отключены (code review L2)
 
 
 def get_balance() -> tuple:
     try:
-        ex = ccxt.bybit({
-            'options': {'defaultType': 'linear'},
-            'enableRateLimit': True,
-            'recvWindow': 60000,
-            'timeout': 5000,
-        })
+        from cryptotrader_strategies.bybit_safe import bybit_exchange
+        ex = bybit_exchange(with_auth=True)
         bal = ex.fetch_balance({'accountType': 'UNIFIED'})
-        usdt = bal.get('total', {}).get('USDT', 0) or 0
-        free = bal.get('free', {}).get('USDT', 0) or 0
-        return float(usdt), float(free)
+        usdt = bal.get('USDT') or {}
+        free = float(usdt.get('free', 0.0) or 0.0)
+        total = float(usdt.get('total', 0.0) or 0.0)
+        return total, free
     except Exception as e:
+        # Логируем ошибку, а не молча возвращаем нули (code review H5)
+        import logging
+        logging.getLogger(__name__).warning('get_balance failed: %s', e)
         return 0.0, 0.0
 
 

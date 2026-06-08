@@ -7,10 +7,8 @@ Multi-strategy live runner — сканирует v2/v6/v7a параллельн
 
 Преимущества: меньше cron-задач, общий risk-check, легче мониторить.
 
-Стратегии (07.06.2026):
+Стратегии (08.06.2026 — v6/v2 ОТКЛЮЧЕНЫ по приказу Босса):
   - v7a (trailing): SUI/NEAR/SOL/LIT/WLD/TON/DOGE/ADA — 8 пар
-  - v6 (no trailing, Bulkowski+VSA+Spring): TON/DOGE/SUI — 3 пары (core 3 from v6 grid)
-  - v2 (ICT only, no VSA): TON/DOGE/SUI — 3 пары (diversity check)
 
 Position size: $5 (tier=starter), 1× leverage, max 2 concurrent per pair (через has_open_position).
 """
@@ -23,7 +21,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import ccxt
 import psycopg2
 import pandas as pd
 
@@ -32,12 +29,10 @@ from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
 
 from cryptotrader_strategies.clone_5_v7 import Clone5V7Strategy
-from cryptotrader_strategies.clone_5_v6 import Clone5V6Strategy
-from cryptotrader_strategies.clone_5_v2_ict import Clone5V2Strategy
 
 DB = dict(
     host="192.168.0.149", port=5432, database="cryptotrader",
-    user="cryptotrader", password=os.environ["POSTGRES_PASSWORD"],
+    user="cryptotrader", password=os.environ.get("POSTGRES_PASSWORD", ""),
 )
 TF = "5m"
 TIMEFRAME_MIN = 5
@@ -52,30 +47,11 @@ STRATEGIES = [
                     "WLDUSDT", "TONUSDT", "DOGEUSDT", "ADAUSDT"],
         "min_conf": 0.50,
     },
-    {
-        "name": "clone5_v6_market_maker_full",
-        "display": "v6",
-        "class": Clone5V6Strategy,
-        "symbols": ["TONUSDT", "DOGEUSDT", "SUIUSDT"],
-        "min_conf": 0.50,
-    },
-    {
-        "name": "clone5_v2_market_maker_ict",
-        "display": "v2",
-        "class": Clone5V2Strategy,
-        "symbols": ["TONUSDT", "DOGEUSDT", "SUIUSDT"],
-        "min_conf": 0.50,
-    },
 ]
 
-# Exchange for live prices
-exchange = ccxt.bybit({
-    "enableRateLimit": True,
-    "options": {"defaultType": "linear"},
-    "timeout": 5000,
-    "recvWindow": 60000,
-})
-exchange.load_markets()
+# Exchange for live prices (time-sync safe, code review H1)
+from cryptotrader_strategies.bybit_safe import bybit_exchange
+exchange = bybit_exchange(with_auth=False)
 
 
 def get_pos_usdt() -> float:
@@ -136,7 +112,12 @@ def has_open_position(symbol: str, strategy_name: str = None) -> bool:
 
 def open_signal(strategy_name: str, symbol: str, side: str, sl_pct: float, tp_pct: float,
                 score: float, reasoning: str, details: dict) -> int:
-    """Create strategy_signals row (ExecutionAgent picks up)."""
+    """Create strategy_signals row (ExecutionAgent picks up).
+
+    Сторона записывается в `action` ('BUY' = LONG, 'SELL' = SHORT).
+    Размер позиции и side-метаданные — в `exit_plan_json` (читается execution_agent).
+    См. code_review/CODE_REVIEW_2026-06-08.md, замечание C1.
+    """
     pos_usdt = get_pos_usdt()
     conn = get_db()
     try:
@@ -150,23 +131,32 @@ def open_signal(strategy_name: str, symbol: str, side: str, sl_pct: float, tp_pc
         if side == 'LONG':
             sl_price = entry_price * (1 - sl_pct / 100)
             tp_price = entry_price * (1 + tp_pct / 100)
+            action = 'BUY'
         else:
             sl_price = entry_price * (1 + sl_pct / 100)
             tp_price = entry_price * (1 - tp_pct / 100)
-        # Use existing schema columns
+            action = 'SELL'
+        # Write side/position to exit_plan_json; legacy details still in reasoning JSON.
+        exit_plan = {
+            "side": side,
+            "position_usdt": pos_usdt,
+            "leverage": 1,
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+        }
+        reasoning_text = json.dumps({
+            "details": details,
+            "reasoning": reasoning,
+        }, default=str)
         cur.execute("""
             INSERT INTO strategy_signals
               (strategy, symbol, action, confidence, entry_price, stop_loss, take_profit,
-               timeframes, reasoning, status, created_at, exchange)
-            VALUES (%s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, 'pending', NOW(), 'bybit')
+               timeframes, reasoning, status, created_at, exchange, exit_plan_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', NOW(), 'bybit', %s)
             RETURNING id
         """, (
-            strategy_name, symbol, float(score), entry_price, sl_price, tp_price,
-            TF, json.dumps({
-                "side": side, "sl_pct": sl_pct, "tp_pct": tp_pct,
-                "position_usdt": pos_usdt, "leverage": 1, "details": details,
-                "reasoning": reasoning,
-            }, default=str),
+            strategy_name, symbol, action, float(score), entry_price, sl_price, tp_price,
+            TF, reasoning_text, json.dumps(exit_plan, default=str),
         ))
         sig_id = cur.fetchone()[0]
         conn.commit()
@@ -197,6 +187,21 @@ def scan_strategy(cfg: dict) -> int:
         if df.empty or len(df) < 100:
             print(f"  ⊘ {sym}: no data ({len(df)} bars)", flush=True)
             continue
+        # M1: stale-guard — последний бар не старше 3×TF (15 мин для 5m)
+        # df.index — это DatetimeIndex, index[-1] — Timestamp (pyright не видит из-за generic Index type).
+        last_ts: pd.Timestamp = df.index[-1]  # type: ignore[assignment]
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize('UTC')
+        age_min = (datetime.now(timezone.utc) - last_ts.to_pydatetime()).total_seconds() / 60
+        if age_min > 3 * TIMEFRAME_MIN:
+            print(f"  ⊘ {sym}: stale data ({age_min:.0f}m old > {3 * TIMEFRAME_MIN}m), skip", flush=True)
+            continue
+        # M7: отбрасываем формирующийся бар, если он ещё не закрыт (age < TF)
+        if age_min < TIMEFRAME_MIN:
+            df = df.iloc[:-1]
+            if len(df) < 100:
+                print(f"  ⊘ {sym}: only forming bar ({age_min:.1f}m), skip", flush=True)
+                continue
         decision = strategy.decide(df, sym)
         sig = decision.get('signal', 'HOLD')
         if sig == 'HOLD':
@@ -221,7 +226,7 @@ def scan_strategy(cfg: dict) -> int:
 
 
 def main():
-    print(f"=== Multi-strategy scan: {datetime.now(timezone.utc).isoformat()} ===", flush=True)
+    # L1: убрали первый заголовок (дубль в clone5_multi_cron.py)
     print(f"Strategies: {len(STRATEGIES)} ({', '.join(s['display'] for s in STRATEGIES)})", flush=True)
     print(f"Pos size: ${get_pos_usdt():.2f} (from compound_state.json)", flush=True)
     print("=" * 80, flush=True)

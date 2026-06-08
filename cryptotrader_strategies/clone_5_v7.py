@@ -152,14 +152,12 @@ class Clone5V7Strategy(Clone5V6Strategy):
         last = len(df) - 1
         current_ts = df.index[last]
 
-        # === Safety check: blackout after max consecutive losses ===
-        state = self._get_state(symbol)
-        if state.is_blackout(current_ts):
-            return self._hold(f"blackout_until_{state.blackout_until}", 0.0, {"state": "blackout"})
-
-        # === Safety check: daily loss limit ===
-        if state.daily_loss_exceeded():
-            return self._hold("daily_loss_limit_exceeded", 0.0, {"state": "daily_loss_exceeded", "daily_pnl": state.daily_pnl_today})
+        # H3 fix (08.06.2026): убраны мёртвые safety-фильтры (blackout/daily-loss).
+        # MartingaleState живёт в памяти процесса, но cron поднимает новый процесс каждый
+        # тик → state всегда пустой → is_blackout() всегда False, daily_loss_exceeded()
+        # всегда False. Дневной лимит убытка реализован на стороне ExecutionAgent
+        # через _check_defenses_pre_open (читает positions.realized_pnl из БД).
+        # v7b (martingale) отключён по итогам бэктеста — см. docstring на :122-127.
 
         last = len(df) - 1
         bullish = self._detect_bullish_hunt(df, last, symbol)
@@ -198,8 +196,9 @@ class Clone5V7Strategy(Clone5V6Strategy):
                 "is_climax": setup.get("is_climax", False),
                 "ev_ratio": setup.get("ev_ratio", 0),
                 "hour_utc": setup.get("hour_utc", 0),
-                "martingale_step": state.current_step,
-                "martingale_size": state.get_position_size(5.0),
+                # H3 fix: state теперь только для отчёта, не для блокировки
+                "martingale_step": self._get_state(symbol).current_step,
+                "martingale_size": self._get_state(symbol).get_position_size(5.0),
             },
         }
 

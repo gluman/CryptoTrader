@@ -230,7 +230,12 @@ agents:
     min_confidence: 0.75      # was 0.45 — raised 2026-05-26 (backtest: selectivity cuts losses)
     vol_gate: 0.5             # skip bars with volume_ratio below this (no LLM call, no trade)
     timeframe: "5m"
-    symbols: ["XRPUSDT", "DOGEUSDT", "TONUSDT"]   # 2026-05-27 minimal go-live: $5 floor pairs (BTC min ~$76, ETH ~$21)
+    # 2026-06-08 (M3 code review): добавлены 8 пар Clone5 v7 для свежести OHLCV.
+    # Только для DataCollector (источник данных). Сигналы генерирует clone5_multi_runner
+    # (cron e020bee290d2) — он читает те же пары из своего STRATEGIES.
+    symbols: ["XRPUSDT", "DOGEUSDT", "TONUSDT",
+              "SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
+              "WLDUSDT", "ADAUSDT"]
   risk:
     enabled: true
     min_position_usd: 5.0

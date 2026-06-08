@@ -54,14 +54,9 @@ def get_tier(balance: float) -> dict:
 def get_bybit_balance() -> float:
     """Получить USDT баланс на Bybit (linear)."""
     try:
-        ex = ccxt.bybit({
-            'apiKey': os.environ['BYBIT_API_KEY'],
-            'secret': os.environ['BYBIT_API_SECRET'],
-            'options': {'defaultType': 'linear'},
-            'enableRateLimit': True,
-            'recvWindow': 60000,
-        })
-        bal = ex.fetch_balance({'type': 'linear'})
+        from cryptotrader_strategies.bybit_safe import bybit_exchange
+        ex = bybit_exchange(with_auth=True)
+        bal = ex.fetch_balance({'type': 'swap', 'accountType': 'UNIFIED'})
         usdt_info = bal.get('USDT') or {}
         free = usdt_info.get('free', 0.0) or 0.0
         return float(free)

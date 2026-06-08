@@ -18,26 +18,22 @@ load_dotenv('/home/andy/CryptoTrader/.env')
 import psycopg2
 
 DB = dict(host="192.168.0.149", port=5432, database="cryptotrader",
-          user="cryptotrader", password=os.environ["POSTGRES_PASSWORD"])
+          user="cryptotrader", password=os.environ.get("POSTGRES_PASSWORD", ""))
 STATE_PATH = Path('/home/andy/CryptoTrader/compound_state.json')
 
 
 def get_balance():
     try:
-        import ccxt
-        ex = ccxt.bybit({
-            'apiKey': os.environ['BYBIT_API_KEY'],
-            'secret': os.environ['BYBIT_API_SECRET'],
-            'options': {'defaultType': 'linear'},
-            'enableRateLimit': True,
-            'recvWindow': 60000,
-        })
-        bal = ex.fetch_balance({'type': 'linear'})
+        from cryptotrader_strategies.bybit_safe import bybit_exchange
+        ex = bybit_exchange(with_auth=True)
+        bal = ex.fetch_balance({'accountType': 'UNIFIED'})
         usdt = bal.get('USDT') or {}
         free = float(usdt.get('free', 0.0) or 0.0)
         total = float(usdt.get('total', 0.0) or 0.0)
         return free, total
     except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('compound_dashboard.get_balance failed: %s', e)
         return 0.0, 0.0
 
 

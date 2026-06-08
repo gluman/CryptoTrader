@@ -75,6 +75,27 @@ class ExecutionAgent(BaseAgent):
         except Exception as e:
             return self.default_sl_pct, self.default_tp_pct, f"defaults (error: {e})"
 
+    def _get_market_qty_step(self, symbol: str) -> float:
+        """M4 helper (08.06.2026): получить qtyStep для пары через ccxt market().
+
+        Используется в execute_linear_buy/short/sell + _check_and_execute_partial_tps +
+        _bybit_market_buy_ccxt для правильного округления количества к реальному шагу Bybit
+        (DOGE=1, NEAR=0.1, SUI=0.1, многие альты=0.01).
+
+        Returns: qtyStep как float (например 1.0, 0.1, 0.01). Fallback 0.01.
+        """
+        try:
+            ccxt_b = self._bybit()
+            if ccxt_b is None:
+                return 0.01
+            sym_ccxt = symbol.upper().replace('USDT', '/USDT:USDT')
+            m = ccxt_b.market(sym_ccxt)
+            lsf = (m.get('info', {}) or {}).get('lotSizeFilter', {})
+            step = float(lsf.get('qtyStep') or (m.get('precision', {}) or {}).get('amount') or 0.01)
+            return step if step > 0 else 0.01
+        except Exception:
+            return 0.01
+
     def _today_realized_pnl(self) -> float:
         """Sum realized_pnl for positions closed since UTC midnight."""
         from sqlalchemy import func as sqlfunc
@@ -293,8 +314,12 @@ class ExecutionAgent(BaseAgent):
                         tp_percent: Optional[float] = None,
                         market_type: str = 'spot',
                         side: str = 'LONG',
-                        exit_plan: Optional[Dict] = None) -> Optional[int]:
-        """Create a new position. exit_plan optional: {"tp1":{"price_pct":...,"close_qty_pct":...}, "tp2":...,"tp3":...,"sl":{},"max_hold_minutes":...}"""
+                        exit_plan: Optional[Dict] = None,
+                        strategy: Optional[str] = None) -> Optional[int]:
+        """Create a new position. exit_plan optional: {"tp1":{"price_pct":...,"close_qty_pct":...}, "tp2":...,"tp3":...,"sl":{},"max_hold_minutes":...}
+
+        M2 (08.06.2026): параметр `strategy` пишется в `notes` для per-strategy dedup.
+        """
         sl_pct = sl_percent or self.default_sl_pct
         tp_pct = tp_percent or self.default_tp_pct
 
@@ -342,7 +367,8 @@ class ExecutionAgent(BaseAgent):
                 if level == "tp1":
                     tp1_price, tp1_qty_pct = price, q_pct
                 elif level == "tp2":
-                    tp2_price, tp2_qty_pct = q_pct and price, q_pct
+                    # M5 fix: было `q_pct and price` — при q_pct=0 давало 0.
+                    tp2_price, tp2_qty_pct = price, q_pct
                 elif level == "tp3":
                     tp3_price, tp3_qty_pct = price, q_pct
             mhm = exit_plan.get("max_hold_minutes")
@@ -366,6 +392,7 @@ class ExecutionAgent(BaseAgent):
                 lowest_price=Decimal(str(entry_price)),
                 signal_id=signal_id,
                 trade_id=trade_id,
+                notes=strategy,  # M2: для per-strategy dedup (clone5_multi_runner.has_open_position)
                 exit_plan_json=exit_plan if exit_plan else None,
                 tp1_price=Decimal(str(tp1_price)) if tp1_price else None,
                 tp1_qty_pct=Decimal(str(tp1_qty_pct)) if tp1_qty_pct else None,
@@ -761,11 +788,15 @@ class ExecutionAgent(BaseAgent):
     def _clean_expired_signals(self) -> Dict:
         """Delete pending signals that exceeded their TTL (by strategy)."""
         from datetime import timedelta
-        # TTL by strategy (in minutes)
+        # TTL by strategy (in minutes). Clone5 пишет раз в час, исполнитель подхватывает
+        # каждые 3 мин — 60 мин достаточно.
         ttl_by_strategy = {
             'scalping': 15,
             'intraday': 60,
             'position': 240,
+            'clone5_v7_trailing_only': 60,
+            'clone5_v6_market_maker_full': 60,
+            'clone5_v2_market_maker_ict': 60,
         }
         cleaned = 0
         details = []
@@ -841,11 +872,13 @@ class ExecutionAgent(BaseAgent):
 
                     # Compute quantity to close (% of INITIAL qty)
                     close_qty = round(init_qty * float(tp_qty_pct) / 100, 4)
-                    # Bybit step rounding 0.01
-                    close_qty = round(close_qty / 0.01) * 0.01
+                    # M4 fix (08.06.2026): qtyStep из ccxt market() вместо хардкода 0.01
+                    step = self._get_market_qty_step(symbol) if hasattr(self, '_get_market_qty_step') else 0.01
+                    close_qty = round(close_qty / step) * step
+                    close_qty = float(f"{close_qty:.10f}".rstrip('0').rstrip('.') or 0)
                     current_qty = float(db_pos.quantity)
                     close_qty = min(close_qty, current_qty)
-                    if close_qty < 0.01:
+                    if close_qty <= 0:
                         # Cannot partial-close (below min step) → mark as hit but skip
                         setattr(db_pos, tp_hit_col, datetime.utcnow())
                         sess.commit()
@@ -906,7 +939,12 @@ class ExecutionAgent(BaseAgent):
 
     def _sync_orphan_positions(self) -> int:
         """Detect DB-open positions that no longer exist on Bybit (closed exchange-side)
-        and sync them as CLOSED using closed-pnl endpoint. Returns count of synced."""
+        and sync them as CLOSED using closed-pnl endpoint. Returns count of synced.
+
+        H6 fix (08.06.2026): используем Bybit server time для timestamp (вместо локального
+        time.time() — у хоста часы могут уходить → 10002). Fallback на локальное время
+        минус 1.5s (известный offset на 2026-06-08) если ccxt недоступен.
+        """
         from src.core.database import Position
         import time as _t, hmac as _h, hashlib as _hh, requests as _r
         synced = 0
@@ -923,8 +961,46 @@ class ExecutionAgent(BaseAgent):
                 if not bybit:
                     return 0
                 key = bybit.api_key; secret = bybit.api_secret
+
+                def _bybit_timestamp() -> int:
+                    """H6: всегда берём Bybit server time (ms).
+
+                    Primary: ccxt.get_server_time() через self._bybit().
+                    Fallback: GET /v5/market/time (без подписи) — этот endpoint всегда
+                    доступен даже при 1310 quota, поскольку не считается в OHLCV-лимит.
+                    Fallback #2: local time + уже синхронизированная дельта из ccxt.
+                    """
+                    # 1) ccxt.get_server_time (самый чистый путь)
+                    try:
+                        ccxt_b = self._bybit()
+                        if ccxt_b:
+                            ts = ccxt_b.get_server_time()
+                            if ts:
+                                return int(ts)
+                    except Exception:
+                        pass
+                    # 2) Прямой GET /v5/market/time (без подписи, без квоты 1310)
+                    try:
+                        resp = _r.get('https://api.bybit.com/v5/market/time', timeout=5)
+                        data = resp.json()
+                        if data.get('retCode') == 0 and data.get('result', {}).get('timeSecond'):
+                            return int(data['result']['timeSecond']) * 1000
+                    except Exception:
+                        pass
+                    # 3) Local time + load_time_difference offset (ccxt-saved delta)
+                    try:
+                        ccxt_b = self._bybit()
+                        if ccxt_b and hasattr(ccxt_b, 'load_time_difference'):
+                            ccxt_b.load_time_difference()
+                            # ccxt корректирует time.time() внутри при adjustForTimeDifference
+                            return int(_t.time() * 1000)
+                    except Exception:
+                        pass
+                    # 4) Совсем плохой fallback — local time. Без магических offset'ов.
+                    return int(_t.time() * 1000)
+
                 # Fetch all open linear positions on Bybit
-                ts = str(int(_t.time() * 1000)); recv = '5000'
+                ts = str(_bybit_timestamp()); recv = '5000'
                 q = 'category=linear&settleCoin=USDT'
                 sig = _h.new(secret.encode(), (ts + key + recv + q).encode(), _hh.sha256).hexdigest()
                 headers = {'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts, 'X-BAPI-RECV-WINDOW': recv, 'X-BAPI-SIGN': sig}
@@ -941,7 +1017,7 @@ class ExecutionAgent(BaseAgent):
                     if age_s < 30:
                         continue  # too new — wait for Bybit settlement
                     # Fetch latest closed-pnl record for this symbol
-                    ts2 = str(int(_t.time() * 1000))
+                    ts2 = str(_bybit_timestamp())
                     q2 = f'category=linear&symbol={pos.symbol}&limit=5'
                     sig2 = _h.new(secret.encode(), (ts2 + key + recv + q2).encode(), _hh.sha256).hexdigest()
                     h2 = {'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts2, 'X-BAPI-RECV-WINDOW': recv, 'X-BAPI-SIGN': sig2}
@@ -1180,7 +1256,17 @@ class ExecutionAgent(BaseAgent):
                     continue
 
                 usdt_balance = self.get_usdt_balance(exchange)
-                amount = min(self.position_usd, usdt_balance)  # FIXED minimal margin (e.g. $5), NOT full balance
+                # H2: уважать position_usdt из сигнала, если задан (Clone5 пишет в exit_plan_json)
+                signal_pos = None
+                if sdata.get('exit_plan') and isinstance(sdata['exit_plan'], dict):
+                    sp = sdata['exit_plan'].get('position_usdt')
+                    if sp is not None:
+                        try:
+                            signal_pos = float(sp)
+                        except (TypeError, ValueError):
+                            signal_pos = None
+                base_amount = signal_pos if signal_pos else self.position_usd
+                amount = min(base_amount, usdt_balance)  # FIXED minimal margin (e.g. $5), NOT full balance
 
                 if amount < 5:
                     self.log('warning', f"Balance too small: ${amount:.2f}")
@@ -1189,11 +1275,19 @@ class ExecutionAgent(BaseAgent):
 
                 amount_str = str(round(amount, 2))
 
-                # ATR-adaptive SL/TP override signal's static values
-                sl_pct, tp_pct, atr_note = self._adaptive_sl_tp_pct(symbol, exchange)
-                self.log('info', f"BUY {symbol} sizing: {atr_note}")
-
-                result = self.execute_linear_buy(symbol, amount_str, exchange, sl_pct, tp_pct)
+                # H4: уважать SL/TP из сигнала, если они есть; иначе ATR-адаптив
+                signal_sl = sdata.get('stop_loss')
+                signal_tp = sdata.get('take_profit')
+                if signal_sl and signal_tp and signal_sl > 0 and signal_tp > 0:
+                    self.log('info', f"BUY {symbol} using signal SL/TP (${signal_sl:.4f}/${signal_tp:.4f})")
+                    result = self.execute_linear_buy(
+                        symbol, amount_str, exchange,
+                        stop_loss_price=str(signal_sl), take_profit_price=str(signal_tp),
+                    )
+                else:
+                    sl_pct, tp_pct, atr_note = self._adaptive_sl_tp_pct(symbol, exchange)
+                    self.log('info', f"BUY {symbol} sizing: {atr_note}")
+                    result = self.execute_linear_buy(symbol, amount_str, exchange, sl_pct, tp_pct)
 
                 if 'error' in result:
                     errors += 1
@@ -1229,6 +1323,7 @@ class ExecutionAgent(BaseAgent):
                     trade_id=trade_id,
                     side='LONG',
                     exit_plan=sdata.get('exit_plan'),
+                    strategy=sdata.get('strategy'),  # M2: per-strategy dedup
                 )
 
                 if position_id is None:
@@ -1284,8 +1379,13 @@ class ExecutionAgent(BaseAgent):
             self.log('error', f"Failed update signal {signal_id}: {e}")
 
     def execute_linear_buy(self, symbol: str, amount: str, exchange: str,
-                           sl_pct: float = None, tp_pct: float = None) -> Dict:
-        """Open LONG position on Bybit linear via ccxt (handles signature correctly)."""
+                           sl_pct: Optional[float] = None, tp_pct: Optional[float] = None,
+                           stop_loss_price: Optional[str] = None, take_profit_price: Optional[str] = None) -> Dict:
+        """Open LONG position on Bybit linear via ccxt (handles signature correctly).
+
+        H4: если переданы абсолютные stop_loss_price / take_profit_price, используем их
+        вместо pct-расчёта (SL/TP из стратегии). Иначе считаем через sl_pct/tp_pct.
+        """
         try:
             if exchange != 'bybit':
                 ex = self.exchanges.get(exchange)
@@ -1355,26 +1455,39 @@ class ExecutionAgent(BaseAgent):
                 if '110043' not in str(lev_err):
                     self.log('warning', f"set_leverage({symbol},{leverage}x) failed: {lev_err}")
 
-            # Step 2: Calculate qty with that leverage, round to lot size step (0.01)
+            # Step 2: Calculate qty with that leverage, round to lot size step.
+            # M4 fix (08.06.2026): qtyStep из ccxt market() вместо хардкода 0.01
+            step = self._get_market_qty_step(symbol) if hasattr(self, '_get_market_qty_step') else 0.01
             pos_value = amount_usdt * leverage
             qty = pos_value / current_price
-            qty = round(qty / 0.01) * 0.01  # Round to qtyStep=0.01
+            qty = round(qty / step) * step
+            qty = float(f"{qty:.10f}".rstrip('0').rstrip('.') or 0)
 
-            if qty < 0.01:
-                return {'error': f'Qty {qty:.4f} below min 0.01'}
+            if qty <= 0:
+                return {'error': f'Qty {qty:.4f} below min {step}'}
 
-            # Step 2b: Calculate SL price (safety net only; TP managed by our partial-close cycle)
-            if sl_pct is None:
-                sl_pct = self.default_sl_pct
-            stop_loss = str(round(current_price * (1 - sl_pct / 100), 4))
+            # Step 2b: SL price (H4: приоритет абсолютному stop_loss_price из сигнала)
+            if stop_loss_price:
+                stop_loss = str(stop_loss_price)
+            elif sl_pct is not None:
+                stop_loss = str(round(current_price * (1 - sl_pct / 100), 4))
+            else:
+                stop_loss = str(round(current_price * (1 - self.default_sl_pct / 100), 4))
 
-            # Step 3: Open position WITHOUT take_profit — Bybit-side TP closes FULL qty in one
-            # shot, vetoing our multi-TP partial closes. We only set SL as a safety net.
-            result = ex.create_linear_order(
+            # H4: take_profit_price из сигнала → ставим на Bybit (если передан)
+            take_profit_arg = str(take_profit_price) if take_profit_price else None
+
+            # Step 3: Open position WITHOUT take_profit by default — Bybit-side TP closes
+            # FULL qty in one shot, vetoing our multi-TP partial closes.
+            # Если передан take_profit_price из сигнала — уважаем его.
+            create_kwargs = dict(
                 symbol=symbol, side='Buy', order_type='Market', qty=str(qty),
                 leverage=str(leverage),
                 stop_loss=stop_loss,
             )
+            if take_profit_arg:
+                create_kwargs['take_profit'] = take_profit_arg
+            result = ex.create_linear_order(**create_kwargs)
 
             if 'error' in result:
                 return result
@@ -1403,8 +1516,12 @@ class ExecutionAgent(BaseAgent):
             return {'error': str(e)}
 
     def execute_linear_short(self, symbol: str, amount: str, exchange: str,
-                             sl_pct: float = None, tp_pct: float = None) -> Dict:
-        """Open SHORT position on linear perpetuals. Mirrors execute_linear_buy."""
+                             sl_pct: Optional[float] = None, tp_pct: Optional[float] = None,
+                             stop_loss_price: Optional[str] = None, take_profit_price: Optional[str] = None) -> Dict:
+        """Open SHORT position on linear perpetuals. Mirrors execute_linear_buy.
+
+        H4: если переданы абсолютные stop_loss_price / take_profit_price — уважаем их.
+        """
         try:
             ex = self.exchanges.get(exchange)
             if not ex:
@@ -1425,23 +1542,49 @@ class ExecutionAgent(BaseAgent):
                     self.log('warning', f"set_leverage({symbol},{leverage}x) failed: {lev_err}")
 
             pos_value = amount_usdt * leverage
+            # M4 fix (08.06.2026): qtyStep из ccxt market() вместо хардкода 0.01.
+            # Fallback на 0.01 для пар где ccxt не вернул lot info.
+            step = 0.01
+            try:
+                ccxt_b = self._bybit()
+                if ccxt_b:
+                    sym_ccxt = symbol.upper().replace('USDT', '/USDT:USDT')
+                    m = ccxt_b.market(sym_ccxt)
+                    lsf = (m.get('info', {}) or {}).get('lotSizeFilter', {})
+                    s = float(lsf.get('qtyStep') or (m.get('precision', {}) or {}).get('amount') or 0.01)
+                    if s > 0:
+                        step = s
+            except Exception:
+                pass
             qty = pos_value / current_price
-            qty = round(qty / 0.01) * 0.01
+            qty = round(qty / step) * step
+            # Strip trailing zeros (напр. 0.10000 → 0.1) для совместимости с Bybit
+            qty = float(f"{qty:.10f}".rstrip('0').rstrip('.') or 0)
 
-            if qty < 0.01:
-                return {'error': f'Qty {qty:.4f} below min 0.01'}
+            if qty <= 0:
+                return {'error': f'Qty {qty:.4f} below min {step}'}
 
-            if sl_pct is None:
-                sl_pct = self.default_sl_pct
+            # H4: SL price (приоритет абсолютному stop_loss_price из сигнала)
+            if stop_loss_price:
+                stop_loss = str(stop_loss_price)
+            elif sl_pct is not None:
+                stop_loss = str(round(current_price * (1 + sl_pct / 100), 4))
+            else:
+                stop_loss = str(round(current_price * (1 + self.default_sl_pct / 100), 4))
 
-            # SHORT: SL above entry. TP managed by our partial-close cycle, NOT Bybit-side.
-            stop_loss = str(round(current_price * (1 + sl_pct / 100), 4))
+            # H4: take_profit_price из сигнала → ставим на Bybit (если передан)
+            take_profit_arg = str(take_profit_price) if take_profit_price else None
 
-            result = ex.create_linear_order(
+            # SHORT: SL above entry. TP managed by our partial-close cycle, NOT Bybit-side
+            # by default; уважаем абсолютный TP из сигнала, если передан.
+            create_kwargs = dict(
                 symbol=symbol, side='Sell', order_type='Market', qty=str(qty),
                 leverage=str(leverage),
                 stop_loss=stop_loss,
             )
+            if take_profit_arg:
+                create_kwargs['take_profit'] = take_profit_arg
+            result = ex.create_linear_order(**create_kwargs)
             if 'error' in result:
                 return result
 
@@ -1509,6 +1652,8 @@ class ExecutionAgent(BaseAgent):
             ).order_by(StrategySignal.created_at.desc()).limit(5).all()
             pending_sells = [
                 {'id': s.id, 'symbol': s.symbol, 'exchange': s.exchange or 'bybit',
+                 'strategy': s.strategy,  # M2: per-strategy dedup
+                 'stop_loss': s.stop_loss, 'take_profit': s.take_profit,
                  'exit_plan': dict(s.exit_plan_json) if s.exit_plan_json else None}
                 for s in pending_sells_raw
             ]
@@ -1536,9 +1681,31 @@ class ExecutionAgent(BaseAgent):
                         self._update_strategy_signal_status(signal_id, 'skipped')
                         continue
 
-                    sl_pct_s, tp_pct_s, atr_note_s = self._adaptive_sl_tp_pct(symbol, exchange)
-                    self.log('info', f"SHORT {symbol} sizing: {atr_note_s}")
-                    short_result = self.execute_linear_short(symbol, str(usdt_balance), exchange, sl_pct_s, tp_pct_s)
+                    # H2: уважать position_usdt из сигнала
+                    signal_pos = None
+                    if sdata.get('exit_plan') and isinstance(sdata['exit_plan'], dict):
+                        sp = sdata['exit_plan'].get('position_usdt')
+                        if sp is not None:
+                            try:
+                                signal_pos = float(sp)
+                            except (TypeError, ValueError):
+                                signal_pos = None
+                    short_amount = signal_pos if signal_pos else min(self.position_usd, usdt_balance)
+                    self.log('info', f"SHORT {symbol} pos=${short_amount:.2f}")
+
+                    # H4: уважать SL/TP из сигнала
+                    signal_sl = sdata.get('stop_loss')
+                    signal_tp = sdata.get('take_profit')
+                    if signal_sl and signal_tp and signal_sl > 0 and signal_tp > 0:
+                        self.log('info', f"SHORT {symbol} using signal SL/TP (${signal_sl:.4f}/${signal_tp:.4f})")
+                        short_result = self.execute_linear_short(
+                            symbol, str(short_amount), exchange,
+                            stop_loss_price=str(signal_sl), take_profit_price=str(signal_tp),
+                        )
+                    else:
+                        sl_pct_s, tp_pct_s, atr_note_s = self._adaptive_sl_tp_pct(symbol, exchange)
+                        self.log('info', f"SHORT {symbol} sizing: {atr_note_s}")
+                        short_result = self.execute_linear_short(symbol, str(short_amount), exchange, sl_pct_s, tp_pct_s)
                     if 'error' in short_result:
                         errors += 1
                         self.log('error', f"SHORT open failed for {symbol}: {short_result['error']}")
@@ -1555,6 +1722,7 @@ class ExecutionAgent(BaseAgent):
                         cost_usdt=cost, signal_id=signal_id,
                         market_type='linear', side='SHORT',
                         exit_plan=sdata.get('exit_plan'),
+                        strategy=sdata.get('strategy'),  # M2: per-strategy dedup
                     )
 
                     self.save_trade_to_db(signal_id, {**short_result, 'price': entry_price}, position_id=position_id)

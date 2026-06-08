@@ -51,25 +51,31 @@ class BybitAPI:
             hashlib.sha256
         ).hexdigest()
     
-    def _make_request(self, method: str, endpoint: str, 
+    def _make_request(self, method: str, endpoint: str,
                       params: Optional[Dict] = None,
                       json_data: Optional[Dict] = None,
                       auth: bool = True) -> Dict:
         self._ensure_rate_limit(is_post=(method.upper() == 'POST'))
-        
+
         url = f"{self.base_url}{endpoint}"
         headers = {}
-        
+
         if auth:
             timestamp = str(int(time.time() * 1000))
-            
+
+            # M6 fix (08.06.2026): подписываем ту же строку, что отправляется.
+            # Раньше подпись строилась из sorted(params), а requests отправлял
+            # в порядке dict — при неалфавитных ключах подпись ≠ запрос → 10004.
+            # Теперь: сериализуем params один раз в отсортированную querystring
+            # и используем её и для подписи, и для отправки.
             if method.upper() == 'GET' and params:
-                param_str = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+                sorted_items = sorted(params.items())
+                param_str = '&'.join([f"{k}={v}" for k, v in sorted_items])
             elif method.upper() == 'POST' and json_data:
                 param_str = json.dumps(json_data, separators=(',', ':'))
             else:
                 param_str = ''
-            
+
             signature = self._sign(timestamp, param_str)
             headers.update({
                 'X-BAPI-API-KEY': self.api_key,
@@ -79,20 +85,26 @@ class BybitAPI:
             })
             if method.upper() == 'POST':
                 headers['Content-Type'] = 'application/json'
-        
+
         try:
-            if method.upper() == 'GET':
-                resp = self.session.get(url, params=params, headers=headers, timeout=30)
+            if method.upper() == 'GET' and params:
+                # M6: используем пред-сериализованный querystring (тот же что и подпись)
+                sorted_items = sorted(params.items())
+                qs = '&'.join([f"{k}={v}" for k, v in sorted_items])
+                full_url = f"{url}?{qs}" if qs else url
+                resp = self.session.get(full_url, headers=headers, timeout=30)
+            elif method.upper() == 'GET':
+                resp = self.session.get(url, headers=headers, timeout=30)
             else:
                 # Use data= with pre-encoded body to ensure exact serialization matches signature
                 body_bytes = json.dumps(json_data, separators=(',', ':')).encode('utf-8') if json_data else None
                 resp = self.session.post(url, data=body_bytes, headers=headers, timeout=30)
-            
+
             data = resp.json()
-            
+
             if data.get('retCode', 0) != 0:
                 raise BybitAPIError(data.get('retCode', -1), data.get('retMsg', 'Unknown error'))
-            
+
             return data
         except requests.RequestException as e:
             raise BybitAPIError(-1, f"Request failed: {str(e)}")
@@ -244,10 +256,14 @@ class BybitAPI:
         )
 
     def create_linear_order(self, symbol: str, side: str, order_type: str = 'Market',
-                            qty: str = None, leverage: str = '15',
+                            qty: Optional[str] = None,
                             stop_loss: Optional[str] = None, take_profit: Optional[str] = None) -> Dict:
         """Create linear perpetual order (Buy=long, Sell=short)
-        Uses one-way mode (positionIdx=0)"""
+        Uses one-way mode (positionIdx=0)
+
+        L5 fix (08.06.2026): убран вводящий в заблуждение параметр leverage='15'.
+        Плечо устанавливается отдельно через set_leverage().
+        """
         # For one-way mode: Buy→side=Buy, Sell→side=Sell, positionIdx=0
         return self.create_order(
             category='linear', symbol=symbol, side=side,
