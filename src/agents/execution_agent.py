@@ -203,12 +203,16 @@ class ExecutionAgent(BaseAgent):
     
     def _init_exchanges(self):
         """Initialize exchange connections"""
-        # Bybit: use ccxt for exchange operations (handles signature correctly)
-        if self.config.bybit and self.config.bybit.get('api_key'):
+        # Bybit: dual-key VPN auto-switch (21.06.2026)
+        # Пытаемся определить рабочий ключ по текущему IP сервера.
+        # VPN-off key → для прямого IP, VPN-on key → для VPN IP.
+        from src.core.bybit_key_selector import select_bybit_key
+        sel_key, sel_secret = select_bybit_key()
+        if sel_key:
             import ccxt
             self.ccxt_bybit = ccxt.bybit({
-                'apiKey': self.config.bybit['api_key'],
-                'secret': self.config.bybit['api_secret'],
+                'apiKey': sel_key,
+                'secret': sel_secret,
                 'enableRateLimit': True,
                 'adjustForTimeDifference': True,
                 'options': {'defaultType': 'swap', 'defaultMarginMode': 'isolated', 'recvWindow': 60000}
@@ -221,10 +225,13 @@ class ExecutionAgent(BaseAgent):
             # Test ccxt is working
             try:
                 self.ccxt_bybit.fetch_balance(params={'type': 'swap', 'accountType': 'UNIFIED'})
-                self.log('info', 'ccxt bybit initialized OK')
+                self.log('info', f'ccxt bybit initialized OK (key={sel_key[:8]}...)')
             except Exception as e:
                 self.log('warning', f'ccxt bybit init failed: {e}')
                 self.ccxt_bybit = None
+        else:
+            self.log('error', 'No working Bybit API key found (VPN auto-switch failed)')
+            self.ccxt_bybit = None
 
         if self.config.binance and self.config.binance.get('api_key'):
             self.exchanges['binance'] = BinanceAPI(
@@ -282,6 +289,91 @@ class ExecutionAgent(BaseAgent):
         except Exception as e:
             self.log('warning', f'_get_bybit_balance_ccxt failed: {e}')
             return {'free': 0, 'used': 0, 'total': 0}
+
+    def _bybit_set_sl_tp(self, symbol: str, sl_price=None, tp_price=None,
+                         trailing_stop=None, active_price=None) -> Dict:
+        """
+        ═══════════════════════════════════════════════════════════════════════════
+        Установить/обновить SL/TP/trailing на Bybit linear через V5 trading-stop.
+        ═══════════════════════════════════════════════════════════════════════════
+        ЗАЧЕМ
+        ─────
+          • Единый безопасный метод для SL/TP/trailing через ccxt V5 endpoint.
+          • Заменяет ex.set_position_sl() (BybitAPI-объект, которого нет для
+            bybit после ccxt-миграции — self.exchanges.get('bybit') = None).
+          • Используется в _check_and_execute_sl_tp для trailing-движения и
+            может вызываться вручную для восстановления стопов на "голых"
+            позициях.
+
+        ЧТО
+        ───
+          • endpoint: POST /v5/position/trading-stop (ccxt: private_post_v5_position_trading_stop)
+          • body: category=linear, symbol, stopLoss?, takeProfit?, tpslMode=Full,
+                  positionIdx=0 (one-way), trailingStop?, activePrice?
+          • Возвращает {'retCode': int, 'retMsg': str}. retCode=0 → успех.
+
+        ПОЧЕМУ ccxt private_post_, а не raw HMAC
+        ────────────────────────────────────────
+          • ccxt-инстанс уже имеет correct apiKey/secret (auto-selected по IP),
+            time-sync (load_time_difference), recvWindow=60000.
+          • Подпись и timestamp-синхронизация берутся на себя ccxt — меньше
+            шансов на 10002 timestamp / 10010 IP mismatch.
+
+        ПАРАМЕТРЫ
+        ─────────
+          • symbol       — 'SUIUSDT' (ccxt-формат преобразуется внутри)
+          • sl_price     — abs SL цена (float/str/None). None = не менять.
+          • tp_price     — abs TP цена (float/str/None). None = не менять.
+          • trailing_stop — distance в USDT для trailing (опц.). Если задан,
+                            нужен active_price — цена активации trailing.
+          • active_price  — цена, при которой trailing стартует (опц.).
+
+        КРАЕВЫЕ СЛУЧАИ
+        ──────────────
+          • ccxt_bybit = None → {'retCode': -1, 'retMsg': 'ccxt not init'}
+          • Пустые SL/TP (None) пропускаются в body — не затирают существующие.
+          • tpslMode='Full' обязательно (Bybit отклоняет 'Partial' без
+            явного дробления qty).
+
+        СМ. ТАКЖЕ
+        ─────────
+          • skill: bybit-linear-sl-tp — verified V5 trading-stop паттерн.
+          • skill: bybit-trailing-stop — программный trailing (this method).
+        ═══════════════════════════════════════════════════════════════════════════
+        """
+        ccxt_bybit = self._bybit()
+        if not ccxt_bybit:
+            return {'retCode': -1, 'retMsg': 'ccxt bybit not initialized'}
+        try:
+            body: Dict = {
+                'category': 'linear',
+                'symbol': symbol,
+                'tpslMode': 'Full',
+                'positionIdx': 0,
+            }
+            if sl_price is not None:
+                body['stopLoss'] = str(sl_price)
+            if tp_price is not None:
+                body['takeProfit'] = str(tp_price)
+            if trailing_stop is not None:
+                body['trailingStop'] = str(trailing_stop)
+                if active_price is not None:
+                    body['activePrice'] = str(active_price)
+            resp = ccxt_bybit.private_post_v5_position_trading_stop(body)
+            return {'retCode': resp.get('retCode', -1), 'retMsg': resp.get('retMsg', '')}
+        except Exception as e:
+            msg = str(e)
+            # ccxt заворачивает retCode в исключение; пытаемся извлечь
+            rc = -1
+            if 'retCode' in msg:
+                try:
+                    import re
+                    m = re.search(r"retCode['\"]?\s*[:=]\s*(\d+)", msg)
+                    if m:
+                        rc = int(m.group(1))
+                except Exception:
+                    pass
+            return {'retCode': rc, 'retMsg': msg[:200]}
 
     def _bybit_market_buy_ccxt(self, symbol: str, amount_usdt: float) -> Dict:
         """Place market buy on Bybit via ccxt. Returns {'retCode': 0, 'orderId': ..., 'executed_qty': ..., 'avgPrice': ...}."""
@@ -626,7 +718,26 @@ class ExecutionAgent(BaseAgent):
             return {'exchange': exchange, 'balances': [], 'error': str(e)}
     
     def get_usdt_balance(self, exchange: str = 'binance') -> float:
-        """Get USDT balance for trading"""
+        """Get USDT balance for trading.
+
+        ═══════════════════════════════════════════════════════════════════════════
+        ЗАЧЕМ ЭТОТ ПАТЧ (27.06.2026 — P0 фикс, Толя)
+        ═══════════════════════════════════════════════════════════════════════════
+        ПРОБЛЕМА: get_balance('bybit') → self.exchanges.get('bybit') = None → return 0.0.
+        Ключ 'bybit' НИКОГДА не добавляется в self.exchanges (только 'binance' и
+        'bitfinex' в _init_exchanges). Bybit был переведён на ccxt (self.ccxt_bybit),
+        но get_usdt_balance() остался на старом пути → всегда возвращает 0.0 для bybit.
+        Это блокировало ВСЕ linear-сигналы: amount = min($5, $0) = $0 < $5 → skipped.
+
+        ФИКС: Для bybit используем _get_bybit_balance_ccxt() (уже существует, строка 280),
+        который правильно дёргает ccxt с auto-key-selector. Старый путь через
+        self.exchanges оставляем для binance/bitfinex (они там есть).
+        ═══════════════════════════════════════════════════════════════════════════
+        """
+        if exchange == 'bybit':
+            bal = self._get_bybit_balance_ccxt()
+            return bal.get('free', 0.0)
+        # Binance / Bitfinex — старый путь через self.exchanges
         balance = self.get_balance(exchange)
         for b in balance.get('balances', []):
             if b['asset'] == 'USDT':
@@ -986,168 +1097,128 @@ class ExecutionAgent(BaseAgent):
         return result
 
     def _sync_orphan_positions(self) -> int:
-        """Detect DB-open positions that no longer exist on Bybit (closed exchange-side)
-        and sync them as CLOSED using closed-pnl endpoint. Returns count of synced.
+            """Detect DB-open positions that no longer exist on Bybit (closed exchange-side)
+            and sync them as CLOSED using closed-pnl endpoint. Returns count of synced.
 
-        H6 fix (08.06.2026): используем Bybit server time для timestamp (вместо локального
-        time.time() — у хоста часы могут уходить → 10002). Fallback на локальное время
-        минус 1.5s (известный offset на 2026-06-08) если ccxt недоступен.
-        """
-        from src.core.database import Position
-        import time as _t, hmac as _h, hashlib as _hh, requests as _r
-        synced = 0
-        try:
-            with self.db.get_session() as sess:
-                db_open = sess.query(Position).filter(
-                    Position.status == 'OPEN',
-                    Position.exchange == 'BYBIT',
-                    Position.market_type == 'linear',
-                ).all()
-                if not db_open:
+            ═══════════════════════════════════════════════════════════════════════════
+            P0-FIX (27.06.2026, Толя): bybit-via-ccxt
+            ───────────────────────────────────────────────────────────────────────────
+            Старая версия использовала self.exchanges.get('bybit').api_key/secret +
+            самописный HMAC + raw requests. После ccxt-миграции self.exchanges НЕ
+            содержит ключ 'bybit' (только binance/bitfinex) → AttributeError/None →
+            orphan-sync возвращал 0 → DB-positions висели как OPEN после
+            реального SL-исполнения на Bybit.
+
+            Новая версия: всё через ccxt (self._bybit()):
+              • fetch_positions(category='linear') — список живых позиций
+              • fetch_closed_orders / private_get_v5_position_closed_pnl — для PnL
+              • Подпись и time-sync ccxt берёт на себя.
+
+            Что делает:
+              1. Берёт все Position(status='OPEN', exchange='BYBIT', market_type='linear')
+              2. Получает список живых символов на Bybit
+              3. Если DB-symbol отсутствует на Bybit → это orphan (закрыт на Bybit)
+              4. Достаём closed-pnl из Bybit (последняя запись для символа)
+              5. Ставим position.status='CLOSED', close_price, realized_pnl, notes
+            ═══════════════════════════════════════════════════════════════════════════
+            """
+            from src.core.database import Position
+            synced = 0
+            try:
+                ccxt_b = self._bybit()
+                if not ccxt_b:
+                    self.log('warning', '_sync_orphan_positions: ccxt_bybit not initialized')
                     return 0
-                bybit = self.exchanges.get('bybit')
-                if not bybit:
+
+                # 1) Список живых символов на Bybit
+                try:
+                    live_positions = ccxt_b.fetch_positions(params={'category': 'linear'})
+                except Exception as e:
+                    self.log('warning', f'_sync_orphan_positions: fetch_positions failed: {e}')
                     return 0
-                key = bybit.api_key; secret = bybit.api_secret
-
-                def _bybit_timestamp() -> int:
-                    """H6 fix (08.06.2026, см. §0.4 R3): серверное время Bybit для подписи.
-
-                    ════════════════════════════════════════════════════════════════
-                    ЗАЧЕМ
-                    ════════════════════════════════════════════════════════════════
-
-                    Bybit отклоняет подписанные запросы, у которых timestamp
-                    опережает серверный более чем на recvWindow (10002). Хост
-                    srv-cryptotrader дрейфует на ~1.5s вперёд (NTP отключён,
-                    sudo у Босса). Старый «магический» fallback `-1500ms` —
-                    хрупкий: при изменении дрейфа подпись ломалась молча.
-
-                    Новая версия: 4-уровневый fallback БЕЗ магических констант,
-                    всегда стараемся получить server time.
-
-                    ════════════════════════════════════════════════════════════════
-                    СТРАТЕГИЯ (от надёжного к менее надёжному)
-                    ════════════════════════════════════════════════════════════════
-
-                    1. `ccxt.get_server_time()` через `self._bybit()`
-                       Лучший путь: ccxt сам дёрнет /v5/market/time и вернёт ms.
-                       НО: счётчик квоты 1310 (OHLCV) НЕ затрагивается здесь,
-                       но get_server_time может попасть под отдельный rate-limit.
-                       Также при проблемах с сетью может дать 503/timeout.
-
-                    2. `GET /v5/market/time` напрямую (без подписи)
-                       Публичный endpoint, всегда работает, квоты 1310 нет.
-                       Это — наша страховка: даже если ccxt сломан, мы
-                       достучимся.
-
-                    3. `ccxt.load_time_difference() + int(time.time()*1000)`
-                       ccxt внутри запомнил `delta = serverTime - localTime`
-                       при предыдущих вызовах. Возвращаем «уже скорректированное»
-                       local time. Работает даже при сетевых проблемах.
-
-                    4. `int(time.time() * 1000)` (БЕЗ коррекции)
-                       Совсем плохой fallback. Если мы здесь — значит вообще
-                       всё сломалось, и любой timestamp лучше чем ничего.
-                       Bybit почти наверняка отклонит (10002), но мы хотя бы
-                       залогируем и вернём 0 buys.
-
-                    ════════════════════════════════════════════════════════════════
-                    СМ. ТАКЖЕ
-                    ════════════════════════════════════════════════════════════════
-
-                      • bybit_safe.py:bybit_exchange() — для ccxt-путей
-                      • cryptotrader_strategies/execute_cron.py — потребитель
-                      • code_review/CODE_REVIEW_2026-06-08.md, §0.4 R3
-                    """
-                    # 1) ccxt.get_server_time (самый чистый путь)
-                    try:
-                        ccxt_b = self._bybit()
-                        if ccxt_b:
-                            ts = ccxt_b.get_server_time()
-                            if ts:
-                                return int(ts)
-                    except Exception:
-                        pass
-                    # 2) Прямой GET /v5/market/time (без подписи, без квоты 1310)
-                    try:
-                        resp = _r.get('https://api.bybit.com/v5/market/time', timeout=5)
-                        data = resp.json()
-                        if data.get('retCode') == 0 and data.get('result', {}).get('timeSecond'):
-                            return int(data['result']['timeSecond']) * 1000
-                    except Exception:
-                        pass
-                    # 3) Local time + load_time_difference offset (ccxt-saved delta)
-                    try:
-                        ccxt_b = self._bybit()
-                        if ccxt_b and hasattr(ccxt_b, 'load_time_difference'):
-                            ccxt_b.load_time_difference()
-                            # ccxt корректирует time.time() внутри при adjustForTimeDifference
-                            return int(_t.time() * 1000)
-                    except Exception:
-                        pass
-                    # 4) Совсем плохой fallback — local time. Без магических offset'ов.
-                    return int(_t.time() * 1000)
-
-                # Fetch all open linear positions on Bybit
-                ts = str(_bybit_timestamp()); recv = '5000'
-                q = 'category=linear&settleCoin=USDT'
-                sig = _h.new(secret.encode(), (ts + key + recv + q).encode(), _hh.sha256).hexdigest()
-                headers = {'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts, 'X-BAPI-RECV-WINDOW': recv, 'X-BAPI-SIGN': sig}
-                resp = _r.get('https://api.bybit.com/v5/position/list?' + q, headers=headers, timeout=10)
                 live_syms = set()
-                for p in resp.json().get('result', {}).get('list', []):
-                    if float(p.get('size', 0)) > 0:
-                        live_syms.add(p['symbol'])
-                # For each DB-open not on Bybit → fetch closed-pnl and close
-                for pos in db_open:
-                    if pos.symbol in live_syms:
-                        continue
-                    age_s = (datetime.utcnow() - pos.opened_at.replace(tzinfo=None)).total_seconds()
-                    if age_s < 30:
-                        continue  # too new — wait for Bybit settlement
-                    # Fetch latest closed-pnl record for this symbol
-                    ts2 = str(_bybit_timestamp())
-                    q2 = f'category=linear&symbol={pos.symbol}&limit=5'
-                    sig2 = _h.new(secret.encode(), (ts2 + key + recv + q2).encode(), _hh.sha256).hexdigest()
-                    h2 = {'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts2, 'X-BAPI-RECV-WINDOW': recv, 'X-BAPI-SIGN': sig2}
-                    r2 = _r.get('https://api.bybit.com/v5/position/closed-pnl?' + q2, headers=h2, timeout=10)
-                    trades = r2.json().get('result', {}).get('list', [])
-                    # Pick the trade whose entry matches our entry_price approximately
-                    target = None
-                    for t in trades:
-                        try:
-                            if abs(float(t['avgEntryPrice']) - float(pos.entry_price)) < float(pos.entry_price) * 0.001:
-                                target = t
-                                break
-                        except (TypeError, KeyError, ValueError):
+                for p in live_positions:
+                    size = float(p.get('contracts') or 0)
+                    if size > 0:
+                        sym_raw = p.get('symbol', '')  # ccxt-формат "SUI/USDT:USDT"
+                        sym_clean = sym_raw.replace('/USDT:USDT', 'USDT') if sym_raw else ''
+                        if sym_clean:
+                            live_syms.add(sym_clean)
+
+                # 2) Найти DB-open, которых нет на Bybit
+                with self.db.get_session() as sess:
+                    db_open = sess.query(Position).filter(
+                        Position.status == 'OPEN',
+                        Position.exchange == 'BYBIT',
+                        Position.market_type == 'linear',
+                    ).all()
+                    if not db_open:
+                        return 0
+
+                    for pos in db_open:
+                        if pos.symbol in live_syms:
                             continue
-                    if not target and trades:
-                        target = trades[0]  # fallback to most recent
-                    if not target:
-                        self.log('warning', f"orphan {pos.symbol}#{pos.id}: no closed-pnl record")
-                        continue
-                    pnl = float(target['closedPnl'])
-                    exit_p = float(target['avgExitPrice'])
-                    pos.status = 'CLOSED'
-                    pos.closed_at = datetime.utcnow()
-                    pos.close_price = Decimal(str(exit_p))
-                    pos.realized_pnl = Decimal(str(pnl))
-                    if pos.entry_price and float(pos.entry_price) > 0:
-                        entry_f = float(pos.entry_price)
-                        pct = (exit_p - entry_f) / entry_f * 100
-                        if (pos.side or 'LONG').upper() == 'SHORT':
-                            pct = -pct
-                        pos.realized_pnl_percent = Decimal(str(round(pct, 4)))
-                    pos.notes = f"orphan-sync: Bybit closed orderId={target.get('orderId')[:12]}…  pnl=${pnl:.4f}"
-                    pos.updated_at = datetime.utcnow()
-                    synced += 1
-                    self.log('info', f"orphan-sync: {pos.symbol}#{pos.id} {(pos.side or 'LONG')} closed @ ${exit_p:.4f} pnl=${pnl:.4f}")
-                if synced:
-                    sess.commit()
-        except Exception as e:
-            self.log('warning', f"orphan sync failed: {e}")
-        return synced
+                        # Свежеоткрытая (< 30s) — дать Bybit settle время
+                        try:
+                            opened_naive = pos.opened_at.replace(tzinfo=None) if pos.opened_at else datetime.utcnow()
+                        except Exception:
+                            opened_naive = datetime.utcnow()
+                        age_s = (datetime.utcnow() - opened_naive).total_seconds()
+                        if age_s < 30:
+                            continue
+                        # 3) Достаём последний closed-pnl
+                        try:
+                            r = ccxt_b.private_get_v5_position_closed_pnl({
+                                'category': 'linear',
+                                'symbol': pos.symbol,
+                                'limit': '5',
+                            })
+                            trades = r.get('result', {}).get('list', [])
+                        except Exception as e:
+                            self.log('warning', f'_sync_orphan_positions: closed-pnl fetch failed for {pos.symbol}: {e}')
+                            continue
+                        # 4) Подбираем запись по entry_price (с допуском 0.1%)
+                        target = None
+                        if trades:
+                            try:
+                                entry_f = float(pos.entry_price) if pos.entry_price else 0
+                                for t in trades:
+                                    t_entry = float(t.get('avgEntryPrice', 0))
+                                    if entry_f > 0 and abs(t_entry - entry_f) < entry_f * 0.001:
+                                        target = t
+                                        break
+                            except (TypeError, KeyError, ValueError):
+                                pass
+                            if not target:
+                                target = trades[0]
+                        if not target:
+                            self.log('warning', f'orphan {pos.symbol}#{pos.id}: no closed-pnl record')
+                            continue
+                        pnl = float(target.get('closedPnl', 0))
+                        exit_p = float(target.get('avgExitPrice', 0))
+                        pos.status = 'CLOSED'
+                        pos.closed_at = datetime.utcnow()
+                        pos.close_price = Decimal(str(exit_p))
+                        pos.realized_pnl = Decimal(str(pnl))
+                        try:
+                            entry_f = float(pos.entry_price) if pos.entry_price else 0
+                            if entry_f > 0:
+                                pct = (exit_p - entry_f) / entry_f * 100
+                                if (pos.side or 'LONG').upper() == 'SHORT':
+                                    pct = -pct
+                                pos.realized_pnl_percent = Decimal(str(round(pct, 4)))
+                        except Exception:
+                            pass
+                        order_id = target.get('orderId', '') or ''
+                        pos.notes = f"orphan-sync: Bybit closed orderId={order_id[:12]}… pnl=${pnl:.4f}"
+                        pos.updated_at = datetime.utcnow()
+                        synced += 1
+                        self.log('info', f"orphan-sync: {pos.symbol}#{pos.id} {(pos.side or 'LONG')} closed @ ${exit_p:.4f} pnl=${pnl:.4f}")
+                    if synced:
+                        sess.commit()
+            except Exception as e:
+                self.log('warning', f"orphan sync failed: {e}")
+            return synced
 
     def _check_and_execute_sl_tp(self) -> Dict:
         """Check and execute SL/TP for all open positions.
@@ -1168,13 +1239,42 @@ class ExecutionAgent(BaseAgent):
                 # Get current price from exchange
                 exchange = pos['exchange']
                 symbol = pos['symbol']
-                ex = self.exchanges.get(exchange)
 
-                if not ex:
-                    continue
+                # ══════════════════════════════════════════════════════════════════
+                # P0-ФИКС (27.06.2026, Толя): Bybit ccxt-путь для monitoring/trailing
+                # ══════════════════════════════════════════════════════════════════
+                # ПРОБЛЕМА: self.exchanges.get('bybit') = None (ключ 'bybit' НИКОГДА
+                # не добавляется в dict — только binance/bitfinex). Весь блок
+                # monitoring (trailing, SL/TP-check, partial-TP) выходил на
+                # `if not ex: continue` для bybit-позиций → позиции "висели" без
+                # наблюдения, trailing никогда не активировался.
+                #
+                # ФИКС: Для exchange='bybit' берём цену через ccxt (self._bybit()),
+                # а объект exchange выставляем в специальный sentinel-маркер,
+                # чтобы нижний код (ex.get_ticker, ex.set_position_sl) не падал.
+                # Сама логика trailing ниже (1221-1277) адаптирована под ccxt.
+                # ══════════════════════════════════════════════════════════════════
+                is_bybit = (exchange or '').lower() == 'bybit'
+                ccxt_bybit = self._bybit() if is_bybit else None
+                ex = None  # sentinel: для bybit объект exchange не используется
 
-                ticker = ex.get_ticker(symbol)
-                current_price = float(ticker.get('lastPrice', 0))
+                if is_bybit:
+                    if not ccxt_bybit:
+                        continue
+                    # Цена через ccxt fetch_ticker
+                    sym_ccxt = symbol.upper().replace('USDT', '/USDT:USDT')
+                    try:
+                        t = ccxt_bybit.fetch_ticker(sym_ccxt)
+                        current_price = float(t.get('last', 0))
+                    except Exception as te:
+                        self.log('warning', f'_check_and_execute_sl_tp: fetch_ticker {symbol} failed: {te}')
+                        continue
+                else:
+                    ex = self.exchanges.get(exchange)
+                    if not ex:
+                        continue
+                    ticker = ex.get_ticker(symbol)
+                    current_price = float(ticker.get('lastPrice', 0))
 
                 if current_price <= 0:
                     continue
@@ -1218,16 +1318,58 @@ class ExecutionAgent(BaseAgent):
                                             new_sl = round(current_price * (1 + trailing_dist_pct / 100), 4)
                                         else:
                                             new_sl = round(current_price * (1 - trailing_dist_pct / 100), 4)
-                                        ts_result = ex.set_position_sl(
-                                            symbol=symbol, stop_loss=str(new_sl), side=bybit_side,
-                                            trailing_active=True, trailing_distance=str(trailing_dist_price),
-                                        )
+                                        if is_bybit:
+                                            # ══════════════════════════════════════════════════════════════════
+                                            # ПРОГРАММНЫЙ TRAILING для Bybit:
+                                            # ──────────────────────────────────────────────────────────────────
+                                            # Bybit V5 trailingStop param имеет сложный scaled-формат
+                                            # (× 10⁸ internal precision) и при неправильном значении
+                                            # возвращает retCode=10001 "TrailingProfit should greater than
+                                            # session_average_price" — даже когда расстояние валидное.
+                                            #
+                                            # Надёжный подход: НЕ передаём Bybit trailingStop вообще.
+                                            # Вместо этого на каждом Execution-цикле (каждые 5m):
+                                            #   1. Пересчитываем target SL = current_price * (1 ± dist%)
+                                            #   2. Если target SL лучше текущего trailing_stop_price
+                                            #      → отправляем на Bybit простой SL-ордер (stopLoss=abs).
+                                            # Bybit исполняет его как обычный stop-market, без trailing-механики.
+                                            #
+                                            # Edge: SL двигается МОНОТОННО в направлении прибыли (только улучшается),
+                                            # trailing_stop_activated=True в БД блокирует обратное движение.
+                                            #
+                                            # Альтернатива (отклонена): activate Bybit-native trailing
+                                            #   trailing_stop="0.0007", active_price=current_price
+                                            #   → 10001 "should greater than session_average_price"
+                                            # ══════════════════════════════════════════════════════════════════
+                                            ts_result = self._bybit_set_sl_tp(
+                                                symbol, sl_price=new_sl
+                                            )
+                                        else:
+                                            ts_result = ex.set_position_sl(
+                                                symbol=symbol, stop_loss=str(new_sl), side=bybit_side,
+                                                trailing_active=True, trailing_distance=str(trailing_dist_price),
+                                            )
                                         if ts_result.get('retCode') == 0:
                                             db_pos.trailing_stop_activated = True
                                             db_pos.trailing_stop_price = Decimal(str(new_sl))
+                                            # ══════════════════════════════════════════════════════════════════
+                                            # SYNC stop_loss в БД ← Bybit trailing-SL
+                                            # ──────────────────────────────────────────────────────────────────
+                                            # Без этого check_stop_loss_take_profit() смотрит на старый
+                                            # stop_loss из БД и НЕ закроет позицию, когда Bybit-native
+                                            # SL сработает по новой (trailing) цене. Это приводит к
+                                            # "ghost positions" в БД после реального SL-закрытия.
+                                            #
+                                            # Идемпотентно: trailing_stop_price и stop_loss теперь
+                                            # равны new_sl на момент активации. Дальнейшие "move"
+                                            # (elif trailing_activated) обновляют оба поля.
+                                            # ══════════════════════════════════════════════════════════════════
+                                            db_pos.stop_loss = Decimal(str(new_sl))
                                             sess.commit()
                                             self.log('info', f"Trailing ACTIVATED for {side} {symbol} @ ${new_sl:.4f} (pnl={pnl_pct:.2f}%, dist=${trailing_dist_price})")
                                             trailing_updated += 1
+                                        else:
+                                            self.log('warning', f"Trailing activation FAILED for {symbol}: {ts_result.get('retMsg','')}")
 
                                     elif trailing_activated:
                                         current_trailing_sl = float(db_pos.trailing_stop_price or 0)
@@ -1238,12 +1380,20 @@ class ExecutionAgent(BaseAgent):
                                             new_trailing_sl = round(current_price * (1 - trailing_dist_pct / 100), 4)
                                             improved = new_trailing_sl > current_trailing_sl  # for LONG, higher SL is better
                                         if improved:
-                                            ts_result = ex.set_position_sl(
-                                                symbol=symbol, stop_loss=str(new_trailing_sl), side=bybit_side,
-                                                trailing_active=True, trailing_distance=str(trailing_dist_price),
-                                            )
+                                            if is_bybit:
+                                                # Программный trailing — см. блок выше
+                                                ts_result = self._bybit_set_sl_tp(
+                                                    symbol, sl_price=new_trailing_sl
+                                                )
+                                            else:
+                                                ts_result = ex.set_position_sl(
+                                                    symbol=symbol, stop_loss=str(new_trailing_sl), side=bybit_side,
+                                                    trailing_active=True, trailing_distance=str(trailing_dist_price),
+                                                )
                                             if ts_result.get('retCode') == 0:
                                                 db_pos.trailing_stop_price = Decimal(str(new_trailing_sl))
+                                                # SYNC stop_loss (см. активационный блок)
+                                                db_pos.stop_loss = Decimal(str(new_trailing_sl))
                                                 sess.commit()
                                                 self.log('info', f"Trailing MOVED for {side} {symbol}: ${current_trailing_sl:.4f} → ${new_trailing_sl:.4f}")
                                                 trailing_updated += 1
@@ -1327,7 +1477,7 @@ class ExecutionAgent(BaseAgent):
 
                 # Check Bybit directly for open positions (not DB — may be stale)
                 # Count how many open positions we have for this symbol
-                max_per_symbol = getattr(self.config.risk, 'max_positions_per_symbol', 1)
+                max_per_symbol = self.config.agents.get('risk', {}).get('max_positions_per_symbol', 1)
                 ex = self.exchanges.get(exchange)
                 open_count = 0
                 if ex and exchange == 'bybit':
