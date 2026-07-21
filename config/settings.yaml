@@ -153,7 +153,15 @@ selection_criteria:
   min_change_1h: 1.5
   max_spread_percent: 0.1
   quote_currency: "USDT"
-  max_symbols: 30
+  # [Fix 2026-06-17 Boss: «TONUSDT stale 3 дня»] — было 30: DataCollector собирал
+  # 30 «movers» + 9 must_haves = 39 пар × 5 TF = 195 API req/цикл. Цикл длился
+  # ~3 мин, TONUSDT не успевал обновиться → stale → scanner skip. Теперь 0: только
+  # 9 must_haves (trading_decision.symbols) × 5 TF = 45 req/цикл (−77%). Цикл <40с,
+  # все пары свежие. Quota: 45 req × ~3 цикла/ч × 168ч ≈ 22 680... НО collector
+  # ходит через fetch_bybit_tickers (1 req) + 45 klines = 46 req/цикл, а цикл
+  # запускается scheduler'ом раз в ~5-10 мин → ~4000-8000 req/week. Это рынок-data,
+  # не trading-data → отдельный quota pool (market endpoint). OK.
+  max_symbols: 0
   # Whitelist/blacklist from 7d backtest (16k spike trades). See /tmp/backtest_spikes.py.
   # Blacklist: net-loss pairs where mean-reversion stops cluster (strong trenders).
   pair_blacklist:
@@ -233,27 +241,49 @@ agents:
     # 2026-06-08 (M3 code review): добавлены 8 пар Clone5 v7 для свежести OHLCV.
     # Только для DataCollector (источник данных). Сигналы генерирует clone5_multi_runner
     # (cron e020bee290d2) — он читает те же пары из своего STRATEGIES.
-    symbols: ["XRPUSDT", "DOGEUSDT", "TONUSDT",
-              "SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
-              "WLDUSDT", "ADAUSDT"]
+    # [Fix 2026-06-17] TONUSDT убран — Bybit closed контракт (delivery 12.06.2026).
+    # DataCollector получал 0 records, данные stale навсегда. Scanner skip'ал TON
+    # каждый тик → потеря 1/8 пар. Теперь 8 рабочих пар (все status=Trading).
+    # [Fix 17.07.2026 Босс] WLD/XRP убраны, добавлены AKE/SOXL/ZEC/ENA/APT/TAO/AVAX/AAVE.
+    # [Fix 19.07.2026 Босс] добавлены BCH/DYDX/AXS/MAGIC/KSM — топ-5 расширенного скрининга.
+    # Без этого списка DataCollector не собирает 5m бары для новых пар → scanner skip'ает stale data.
+    symbols: ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
+              "DOGEUSDT", "ADAUSDT",
+              "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
+              "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
+              "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT"]
   risk:
     enabled: true
     min_position_usd: 5.0
     max_position_usd: 5.0        # fixed minimal notional margin (read by execution_agent.position_usd)
     leverage: 1                  # 1x — no liquidation risk (read by execution_agent.leverage)
-    min_confidence_for_max_size: 0.55
-    # ATR-based dynamic SL/TP. Floors prevent silly-tight stops on quiet bars.
-    # SL  = max(sl_floor_pct, k_sl × ATR_pct)
-    # TP  = max(tp_floor_pct, k_tp × ATR_pct)  with R/R cap enforced
+    min_confidence_for_max_size: 0.70    # [Fix 17.07.2026 Босс] 0.55→0.70: регрессия показала 25% WR, нужно больше качества
+    # ═══ R23 (08.07.2026): floors учитывают fee buffer ═══
+    # Bybit linear fee = 0.055% per side × 2 = 0.11% round-trip.
+    # SL/TP floor должны покрывать fee, иначе даже gross-profit trade = net loss.
+    #   • SL floor 0.30%: SL hit loss includes fee → реальный loss ≈ 0.41% (acceptable, tight)
+    #   • TP floor 0.70%: gross 0.70% − fee 0.11% = NET 0.59% (real edge)
     default_stop_loss_percent: 0.30    # floor; effective SL may widen
-    default_take_profit_percent: 0.50  # floor; effective TP may widen
+    # [Fix 17.07.2026 Босс] TP 0.70% → 0.50%: регрессия 06-12.07 показала
+    # SL hit = 15/36 (42%), TP hit = 5/36 (14%). Слишком высокий TP для 5m.
+    # С 0.50% (effective 0.70% с fee buffer) больше TP hits → лучше WR.
+    default_take_profit_percent: 0.50  # floor; effective TP may widen — fee-aware
     sl_atr_multiplier: 1.0             # k_sl — 1× ATR is industry-standard
     tp_atr_multiplier: 1.7             # k_tp — 1.7× ATR gives ~1.7 R/R
     risk_reward_ratio: 1.67
     trailing_stop_enabled: true
-    # Trailing armed AFTER position reaches activation pct (now in monitor loop, not at open)
-    trailing_stop_activation_percent: 0.20
-    trailing_stop_distance_percent: 0.10
+    # R23: trailing теперь fee-aware. Distance 0.50% покрывает fee (0.11%)
+    # + 4× typical 5m noise (0.10%) = 0.51%. Activation 1.0% — даём цене реально выйти
+    # за пределы noise-floor перед тем как trailing "запоминает" SL.
+    # Было: 0.20/0.10 — активировался на noise + distance меньше fee.
+    trailing_stop_activation_percent: 1.0
+    trailing_stop_distance_percent: 0.50
+    # BE-стоп (Босс 04.07.2026): когда pnl >= activation → SL переносится в entry±offset.
+    # R23: offset 0.15% покрывает fee round-trip 0.11% + safety margin. Было 0.03%
+    # (комментарий говорил "for taker fee" но фактически покрывал только 1/4 fee).
+    breakeven_enabled: true
+    breakeven_activation_percent: 0.50   # 0.50% profit прежде чем SL → BE (было 0.20)
+    breakeven_offset_percent: 0.15       # +0.15% поверх entry для fee-survival
     max_positions_per_symbol: 1
     max_open_positions_total: 3   # 2026-05-27 LIVE: up to 3 (one per symbol XRP/DOGE/TON), $5×3=$15 max exposure
     daily_max_loss_usd: 1.5

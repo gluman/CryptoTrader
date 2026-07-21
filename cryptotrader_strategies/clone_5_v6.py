@@ -39,13 +39,13 @@ from .base_strategy import (
 
 
 # Per-pair tuned parameters
-PER_PAIR_PARAMS = {
-    "DOGEUSDT": {"swing_lookback": 30, "sweep_threshold": 0.003, "wick_body_min_ratio": 1.0, "min_volume_spike": 1.3},
-    "TONUSDT":  {"swing_lookback": 80, "sweep_threshold": 0.005, "wick_body_min_ratio": 1.0, "min_volume_spike": 1.3},
-    "SUIUSDT":  {"swing_lookback": 80, "sweep_threshold": 0.005, "wick_body_min_ratio": 1.0, "min_volume_spike": 1.3},
-    "XRPUSDT":  {"swing_lookback": 50, "sweep_threshold": 0.003, "wick_body_min_ratio": 1.0, "min_volume_spike": 1.3},
-    "ADAUSDT":  {"swing_lookback": 50, "sweep_threshold": 0.003, "wick_body_min_ratio": 1.0, "min_volume_spike": 1.3},
-}
+# R19b (19.06.2026): per-pair override ОТКЛЮЧЁН по приказу Босса. Все пары теперь
+# используют единые дефолты из StrategyParams (sweep=0.0015, wick=0.6, vol=1.0,
+# swing_lookback=50). Ранее: DOGE=30/0.0015, SUI=80/0.0025, XRP/ADA=50/0.0015, TON=80/0.0025.
+# TON не торгуется (нет в списке 8 пар), но override был legacy.
+# Пустой dict → _apply_per_pair_params() no-op → дефолты StrategyParams.
+# Бэкап с per-pair значениями: clone_5_v6.py.bak.relax.20260619_150944
+PER_PAIR_PARAMS = {}
 
 
 class Clone5V6Strategy(BaseStrategy):
@@ -64,10 +64,15 @@ class Clone5V6Strategy(BaseStrategy):
     )
 
     # === Per-pair parameters ===
+    # R19 (19.06.2026): ослаблены для увеличения потока кандидатов → LLM-гейту.
+    # Симуляция 24ч: CURRENT(0.003/1.3/1.0)=6 кандидатов → RELAXED(0.0015/1.0/0.6)=14 (×2.3).
+    # LLM M3-гейт (R18 Mode C) компенсирует возросший риск ложных входов: он получает
+    # больше кандидатов и отсекает слабые через Composite MM master-prompt.
+    # Бэкап: clone_5_v6.py.bak.relax.20260619_150944
     swing_lookback: int = 50
-    sweep_threshold: float = 0.003
-    wick_body_min_ratio: float = 1.0
-    min_volume_spike: float = 1.3
+    sweep_threshold: float = 0.0015  # R19: 0.003 → 0.0015 (sweep-downswing ≥0.15%)
+    wick_body_min_ratio: float = 0.6  # R19: 1.0 → 0.6 (фитиль ≥0.6×тела)
+    min_volume_spike: float = 1.0     # R19: 1.3 → 1.0 (объём ≥1.0× среднего)
     min_rr_ratio: float = 2.5
 
     # === ICT session: London+NY 8-20 UTC ===
@@ -106,8 +111,132 @@ class Clone5V6Strategy(BaseStrategy):
     near_round_bonus: float = 0.05
     min_score_to_trade: float = 0.55  # higher than v2 (0.50) → fewer, better trades
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # GAP FILTERS (R18, 18.06.2026) — из mm_strategy_rules.json (D3/E2/B4/N5)
+    # Источник: Composite MM Mind master-prompt, извлечён из 5 книг.
+    # D3: FOMO filter — бар >2% = уже поздно, CO двигает, вход = на хаях/лоях.
+    # E2: Multi-TF trend alignment — spring против 1h тренда = менее надёжный.
+    # B4: Market condition — springs надёжнее в bear, UTADs в bull.
+    # N5: Engulfing at sweep = сильный absorption signal.
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    # D3 FOMO: бар > fomo_max_bar_return_pct → HOLD (вход = покупка на хаях)
+    fomo_filter_enabled: bool = True
+    fomo_max_bar_return_pct: float = 2.0
+
+    # E2 Multi-TF: penalize counter-trend signals (trend from higher TF, set externally)
+    # trend_alignment: "up" | "down" | "flat" | "unknown"
+    counter_trend_penalty: float = 0.07  # вычитается из score если против тренда
+
+    # B4 Market condition bonus: springs в bear market надёжнее (Bulkowski DB bust=10.2%)
+    market_condition_bonus: float = 0.05
+
+    # N5 Engulfing at sweep: current bar fully engulfs prev = absorption confirmation
+    engulfing_bonus: float = 0.10
+
     def __init__(self, logger=None):
         super().__init__(self.PARAMS, logger)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # R18 (18.06.2026): External trend/market-condition state.
+    # Set by clone5_multi_runner перед decide(). Поддерживает gap-фильтры E2/B4.
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # Per-symbol higher-TF trend: {symbol: "up"|"down"|"flat"|"unknown"}
+    _higher_tf_trends: Optional[Dict[str, str]] = None
+    # Per-symbol market condition: {symbol: "bull"|"bear"|"neutral"|"unknown"}
+    _market_conditions: Optional[Dict[str, str]] = None
+
+    def set_higher_tf_trends(self, trends: Dict[str, str]) -> None:
+        """Set per-symbol 1h trend (called by runner before scan).
+
+        Args:
+            trends: {"SUIUSDT": "up", "DOGEUSDT": "down", ...}
+        """
+        self._higher_tf_trends = trends or {}
+
+    def set_market_conditions(self, conditions: Dict[str, str]) -> None:
+        """Set per-symbol market condition bull/bear (called by runner before scan).
+
+        Args:
+            conditions: {"SUIUSDT": "bear", ...}
+        """
+        self._market_conditions = conditions or {}
+
+    def _get_trend_for(self, symbol: str) -> str:
+        return (self._higher_tf_trends or {}).get(symbol, "unknown")
+
+    def _get_market_for(self, symbol: str) -> str:
+        return (self._market_conditions or {}).get(symbol, "unknown")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # GAP FILTER helper functions (R18)
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _fomo_check(self, df: pd.DataFrame, last: int) -> Tuple[bool, float]:
+        """D3 FOMO filter: если последний бар >2% = FOMO trap.
+
+        Возвращает (is_fomo, bar_return_pct).
+        is_fomo=True → сигнал должен быть HOLD (вход = покупка на хаях).
+        """
+        if last < 1 or not self.fomo_filter_enabled:
+            return False, 0.0
+        prev_c = float(df.iloc[last - 1]["close"])
+        curr_c = float(df.iloc[last]["close"])
+        if prev_c <= 0:
+            return False, 0.0
+        bar_ret = abs(curr_c - prev_c) / prev_c * 100
+        return bar_ret > self.fomo_max_bar_return_pct, bar_ret
+
+    def _trend_alignment_check(self, side: str, symbol: str) -> Tuple[str, float]:
+        """E2 Multi-TF trend filter.
+
+        Возвращает (alignment, penalty).
+        alignment: "with" | "against" | "neutral"
+        penalty > 0 если против тренда (вычитается из score).
+        """
+        trend = self._get_trend_for(symbol)
+        if trend == "unknown":
+            return "neutral", 0.0
+        is_long = (side == "LONG")
+        if (is_long and trend == "up") or (not is_long and trend == "down"):
+            return "with", 0.0
+        if (is_long and trend == "down") or (not is_long and trend == "up"):
+            return "against", self.counter_trend_penalty
+        return "neutral", 0.0  # flat
+
+    def _market_condition_bonus(self, side: str, symbol: str) -> float:
+        """B4 Market condition: springs надёжнее в bear, UTADs в bull."""
+        mc = self._get_market_for(symbol)
+        if mc == "unknown":
+            return 0.0
+        is_long = (side == "LONG")
+        if (is_long and mc == "bear") or (not is_long and mc == "bull"):
+            return self.market_condition_bonus
+        return 0.0
+
+    def _is_engulfing(self, df: pd.DataFrame, last: int, side: str) -> bool:
+        """N5 Engulfing: current bar fully engulfs previous (absorption signal).
+
+        Bullish engulfing: prev bearish (down-close), curr bullish (up-close),
+        curr body полностью поглощает prev body (high>=prev_high, low<=prev_low).
+        Bearish engulfing: зеркально.
+        """
+        if last < 1:
+            return False
+        prev = df.iloc[last - 1]
+        curr = df.iloc[last]
+        p_o, p_c = float(prev["open"]), float(prev["close"])
+        c_o, c_c = float(curr["open"]), float(curr["close"])
+        if side == "LONG":
+            # bullish engulfing: prev red, curr green, engulf
+            if p_c >= p_o or c_c <= c_o:
+                return False
+            return c_o <= p_c and c_c >= p_o
+        else:
+            # bearish engulfing: prev green, curr red, engulf
+            if p_c <= p_o or c_c >= c_o:
+                return False
+            return c_o >= p_c and c_c <= p_o
 
     def _apply_per_pair_params(self, symbol: str):
         p = PER_PAIR_PARAMS.get(symbol, {})
@@ -304,6 +433,11 @@ class Clone5V6Strategy(BaseStrategy):
         if not (self.session_start_utc <= hour_utc < self.session_end_utc):
             return None
 
+        # ═══ R18 D3: FOMO filter — бар >2% = FOMO trap, не входить ═══
+        is_fomo, bar_return_pct = self._fomo_check(df, last)
+        if is_fomo:
+            return None
+
         # === ICT EQH/EQL bonus ===
         eql_count = self._count_equal_levels(lows, swing_low, self.equal_lows_tolerance_pct, lookback=100)
         has_eql = eql_count >= self.min_equal_lows_count
@@ -323,6 +457,9 @@ class Clone5V6Strategy(BaseStrategy):
 
         # === Round number bonus ===
         near_round = self._is_near_round_number(swing_low)
+
+        # ═══ R18 N5: Engulfing at sweep (absorption confirmation) ═══
+        is_engulfing = self._is_engulfing(df, last, "LONG")
 
         # === Score calculation ===
         score = self.score_base
@@ -346,6 +483,21 @@ class Clone5V6Strategy(BaseStrategy):
         if near_round:
             score += self.near_round_bonus
             reasons.append("near_round")
+        if is_engulfing:
+            score += self.engulfing_bonus
+            reasons.append("engulfing")
+
+        # ═══ R18 E2: Multi-TF trend alignment penalty ═══
+        trend_alignment, trend_penalty = self._trend_alignment_check("LONG", symbol)
+        if trend_penalty > 0:
+            score -= trend_penalty
+            reasons.append(f"trend_penalty={trend_penalty:.2f}(against_1h)")
+
+        # ═══ R18 B4: Market condition bonus (springs в bear надёжнее) ═══
+        mc_bonus = self._market_condition_bonus("LONG", symbol)
+        if mc_bonus > 0:
+            score += mc_bonus
+            reasons.append(f"mc_bonus={mc_bonus:.2f}(bear_long)")
 
         if score < self.min_score_to_trade:
             return None
@@ -380,6 +532,12 @@ class Clone5V6Strategy(BaseStrategy):
             "ev_ratio": ev_ratio,
             "reasons": reasons,
             "hour_utc": hour_utc,
+            # R18 gap-filter diagnostics
+            "is_engulfing": is_engulfing,
+            "trend_alignment": trend_alignment,
+            "trend_penalty": trend_penalty,
+            "mc_bonus": mc_bonus,
+            "bar_return_pct": bar_return_pct,
         }
 
     def _detect_bearish_hunt(self, df: pd.DataFrame, last: int, symbol: str) -> Optional[Dict[str, Any]]:
@@ -419,6 +577,11 @@ class Clone5V6Strategy(BaseStrategy):
         if not (self.session_start_utc <= hour_utc < self.session_end_utc):
             return None
 
+        # ═══ R18 D3: FOMO filter — бар >2% = FOMO trap, не входить ═══
+        is_fomo, bar_return_pct = self._fomo_check(df, last)
+        if is_fomo:
+            return None
+
         eqh_count = self._count_equal_levels(highs, swing_high, self.equal_lows_tolerance_pct, lookback=100)
         has_eqh = eqh_count >= self.min_equal_lows_count
 
@@ -433,6 +596,9 @@ class Clone5V6Strategy(BaseStrategy):
         is_utad, utad_height = self._detect_utad_pattern(df, last)
 
         near_round = self._is_near_round_number(swing_high)
+
+        # ═══ R18 N5: Engulfing at sweep (absorption confirmation) ═══
+        is_engulfing = self._is_engulfing(df, last, "SHORT")
 
         score = self.score_base
         reasons = [f"v6_bearish_hunt:sw={sweep_dist*100:.2f}%,wr={wick_ratio:.1f},vol={vol_spike:.1f}x"]
@@ -455,6 +621,21 @@ class Clone5V6Strategy(BaseStrategy):
         if near_round:
             score += self.near_round_bonus
             reasons.append("near_round")
+        if is_engulfing:
+            score += self.engulfing_bonus
+            reasons.append("engulfing")
+
+        # ═══ R18 E2: Multi-TF trend alignment penalty ═══
+        trend_alignment, trend_penalty = self._trend_alignment_check("SHORT", symbol)
+        if trend_penalty > 0:
+            score -= trend_penalty
+            reasons.append(f"trend_penalty={trend_penalty:.2f}(against_1h)")
+
+        # ═══ R18 B4: Market condition bonus (UTADs в bull надёжнее) ═══
+        mc_bonus = self._market_condition_bonus("SHORT", symbol)
+        if mc_bonus > 0:
+            score += mc_bonus
+            reasons.append(f"mc_bonus={mc_bonus:.2f}(bull_short)")
 
         if score < self.min_score_to_trade:
             return None
@@ -488,6 +669,12 @@ class Clone5V6Strategy(BaseStrategy):
             "ev_ratio": ev_ratio,
             "reasons": reasons,
             "hour_utc": hour_utc,
+            # R18 gap-filter diagnostics
+            "is_engulfing": is_engulfing,
+            "trend_alignment": trend_alignment,
+            "trend_penalty": trend_penalty,
+            "mc_bonus": mc_bonus,
+            "bar_return_pct": bar_return_pct,
         }
 
     def decide(self, df: pd.DataFrame, symbol: str,

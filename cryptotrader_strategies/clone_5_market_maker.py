@@ -183,10 +183,12 @@ class Clone5MarketMakerStrategy(BaseStrategy):
         sl_price = l * 0.995
         sl_pct = (price - sl_price) / price * 100
 
-        # 10. TP = recent swing high (последние swing_lookback баров)
+        # 10. TP = recent swing high (последние swing_lookback баров).
+        # R23 (08.07.2026): fallback tp_pct поднят с 1.5 до 2.5% — fee-aware.
+        # Без swing point ближе → minimum NET profit 2.5% (gross 2.7% на бирже).
         recent_high = float(np.max(highs[max(0, last-self.swing_lookback):last]))
         if recent_high <= price:
-            tp_pct = 1.5
+            tp_pct = 2.5
         else:
             tp_pct = (recent_high - price) / price * 100
 
@@ -291,10 +293,10 @@ class Clone5MarketMakerStrategy(BaseStrategy):
         sl_price = h * 1.005
         sl_pct = (sl_price - price) / price * 100
 
-        # TP = recent swing low
+        # TP = recent swing low. R23: fallback tp_pct поднят до 2.5% — fee-aware.
         recent_low = float(np.min(lows[max(0, last-self.swing_lookback):last]))
         if recent_low >= price:
-            tp_pct = 1.5
+            tp_pct = 2.5
         else:
             tp_pct = (price - recent_low) / price * 100
 

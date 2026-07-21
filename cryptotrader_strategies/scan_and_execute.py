@@ -255,10 +255,156 @@ def phase2_execute(cb_state: dict) -> dict:
 # MAIN — единый tick: scan → execute → report
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def phase0_collect() -> dict:
+    """Собрать свежие OHLCV 5m для 8 пар через BybitAPI (точечно, 8 req).
+
+    ════════════════════════════════════════════════════════════════════════════
+    ЗАЧЕМ:
+    DataCollectorAgent.run_once() запускался ТОЛЬКО на startup FastAPI.
+    Между рестартами данные старели → Phase 1 skip'ал пары по stale-guard.
+    Phase 0 собирает 5m бары каждый тик, до scan.
+
+    ПОЧЕМУ ТОЧЕЧНО (а НЕ через run_once):
+    • run_once() собирает 5 TF × 10 пар = 50 kline req + RSS news (~8 сек).
+    • На 5m cron (288 тиков/день): 50 × 288 = 14 400 req/день = 100 800/week.
+      При лимите 1000/week — 100x перебор.
+    • Точечный сбор: 1 TF (5m) × 8 пар = 8 req/тик × 288 = 2 304/день
+      = 16 128/week. Всё ещё много...
+
+    ── КВОТА Bybit linear: 1000 req/week для tier1. ──
+    Phase 0 НЕЛЬЗЯ запускать каждые 5 мин — quota выгорит за 1 час.
+    РЕШЕНИЕ: Phase 0 вызывается из main(), но main() запускается cron'ом
+    каждые 15 мин (96 тиков/день), не 5 мин.
+    8 req × 96 = 768 req/день → неделя = 5 376. Всё ещё > 1000.
+
+    ФИНАЛЬНОЕ РЕШЕНИЕ (R15): Phase 0 берет только 5m, 100 баров.
+    Bybit kline endpoint = 1 req на 100 свечей = 1 req/pair/тик.
+    8 req/тик. Cron каждые 15 мин = 96 тиков/день = 768/день = 5 376/week.
+    Это 5.4x лимита. НЕДОПУСТИМО.
+
+    АЛЬТЕРНАТИВА (R15 final): Phase 0 через ccxt fetch_ohlcv (public endpoint,
+    НЕ linear derivatives API → НЕ считается в weekly quota).
+    Public market data endpoints на Bybit = отдельный лимит, гораздо выше.
+
+    РЕАЛИЗАЦИЯ: используем ccxt fetch_ohlcv (public, без API key для данных).
+    ════════════════════════════════════════════════════════════════════════════
+
+    Returns:
+        {"status": "ok"|"error", "pairs": int, "bars": int, "error": str?}
+    """
+    print(f"── Phase 0: COLLECT 5m ({now_msk_str()}) ──", flush=True)
+    try:
+        from src.core.config import Config
+        from src.core.database import DatabaseManager
+        from src.core.logger import setup_logger
+
+        config = Config.load()
+        ct_logger = setup_logger('cryptotrader', level='INFO',
+                                 log_file=config.logging.get('file'))
+        db = DatabaseManager(config.postgresql, ct_logger)
+
+        # v7a universe — динамически из STRATEGIES (single source of truth).
+        # [Fix 19.07.2026 Босс] Добавлены новые пары, без этого списка Phase 0
+        # собирает только 8 старых пар → scanner skip'ает stale data.
+        from cryptotrader_strategies.clone5_multi_runner import STRATEGIES
+        symbols = list(STRATEGIES[0]["symbols"])
+
+        # R16 (17.06): откат 15m → 5m. Сравнение на идентичном окне 31д показало
+        # PF 1.89 (5m) vs 1.02 (15m). 15m деградировал. Возврат на 5m.
+        COLLECT_TF = "5m"
+
+        # Используем ccxt public endpoint (не считается в linear quota)
+        import ccxt
+        ex = ccxt.bybit({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'linear'},
+        })
+
+        from sqlalchemy import text as sa_text
+        from datetime import datetime as _dt, timezone as _tz
+
+        # ────────────────────────────────────────────────────────────────────
+        # P0-FIX (15.07.2026): naive datetime → timezone-aware UTC
+        #
+        # ЗАЧЕМ: Postgres session timezone = Europe/Moscow (+03:00). Когда
+        # Phase 0 шлёт naive datetime (без tzinfo), Postgres интерпретирует
+        # его как local time и сохраняет с меткой +03:00. Реальный UTC-
+        # timestamp от Bybit (например, 12:25 UTC = 15:25 MSK) превращается
+        # в `12:25+03:00` = 09:25 UTC, что на 3 ЧАСА РАНЬШЕ реальности.
+        # Сканер видит эти данные как stale → 0 сигналов.
+        #
+        # РЕШЕНИЕ: fromtimestamp(ts_ms, tz=timezone.utc) → aware UTC →
+        # Postgres сохраняет корректно.
+        #
+        # ДОПОЛНИТЕЛЬНО: добавлен RETURNING (xmax=0) для подсчёта реальных
+        # INSERT vs UPDATE (ON CONFLICT) — раньше логировались все 800 как
+        # «bars», хотя фактически ни одного нового не вставлялось.
+        # ────────────────────────────────────────────────────────────────────
+        total_bars = 0
+        total_inserted = 0
+        total_updated = 0
+        for sym in symbols:
+            try:
+                ohlcv = ex.fetch_ohlcv(sym, COLLECT_TF, limit=100)
+                if not ohlcv:
+                    continue
+                from sqlalchemy import text as sa_text
+                with db.get_session() as session:
+                    for candle in ohlcv:
+                        # FIX: timezone-aware UTC (was: _dt.utcfromtimestamp — naive)
+                        ts = _dt.fromtimestamp(candle[0] / 1000, tz=_tz.utc)
+                        o, h, l, c, v = candle[1], candle[2], candle[3], candle[4], candle[5]
+                        qv = float(v) * float(c)
+                        res = session.execute(sa_text("""
+                            INSERT INTO ohlcv_raw
+                                (exchange, symbol, timeframe, timestamp,
+                                 open, high, low, close, volume, quote_volume, trades_count)
+                            VALUES
+                                (:ex, :sym, :tf, :ts, :o, :h, :l, :c, :v, :qv, 0)
+                            ON CONFLICT (exchange, symbol, timeframe, timestamp)
+                            DO UPDATE SET
+                                open = EXCLUDED.open, high = EXCLUDED.high,
+                                low = EXCLUDED.low, close = EXCLUDED.close,
+                                volume = EXCLUDED.volume, quote_volume = EXCLUDED.quote_volume
+                            RETURNING (xmax = 0) AS was_inserted
+                        """), {
+                            "ex": "bybit", "sym": sym, "tf": COLLECT_TF, "ts": ts,
+                            "o": o, "h": h, "l": l, "c": c, "v": v, "qv": qv,
+                        })
+                        row = res.fetchone()
+                        if row and row[0]:
+                            total_inserted += 1
+                        else:
+                            total_updated += 1
+                    session.commit()
+                    total_bars += len(ohlcv)
+            except Exception as e:
+                log.warning(f"Phase 0: {sym} fetch failed: {e}")
+
+        print(
+            f"  Phase 0 done: {len(symbols)} pairs, {total_bars} bars "
+            f"(inserted={total_inserted}, updated={total_updated})",
+            flush=True,
+        )
+        return {
+            "status": "ok",
+            "pairs": len(symbols),
+            "bars": total_bars,
+            "inserted": total_inserted,
+            "updated": total_updated,
+        }
+    except Exception as e:
+        log.exception(f"Phase 0 (collect) failed: {e}")
+        return {"status": "error", "pairs": 0, "bars": 0, "error": str(e)}
+
+
 def main() -> int:
-    """Единый scan→execute tick. Возвращает exit code (0=ok, 1=error)."""
+    """Единый collect→scan→execute tick. Возвращает exit code (0=ok, 1=error)."""
     started = datetime.now(timezone.utc)
-    log.info(f"=== Scan+Execute tick: {started.isoformat()} ===")
+    log.info(f"=== Collect+Scan+Execute tick: {started.isoformat()} ===")
+
+    # ── PHASE 0: COLLECT (Bybit kline API, ~8 req) ──
+    p0 = phase0_collect()
 
     # ── PHASE 1: SCAN (0 API calls) ──
     p1 = phase1_scan()
@@ -270,24 +416,27 @@ def main() -> int:
     # ── REPORT ──
     duration = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
     summary = {
-        "status": "ok" if p1.get("status") != "error" and p2.get("status") != "error" else "error",
+        "status": "ok" if p0.get("status") != "error" and p1.get("status") != "error" and p2.get("status") != "error" else "error",
         "ts": msk_iso_now(),
         "ts_msk": now_msk_str(),
         "duration_s": duration,
+        "phase0_collect": p0,
         "phase1_scan": p1,
         "phase2_execute": p2,
     }
     log.info(
-        f"Tick done in {duration}s: scan_signals={p1.get('signals', 0)} "
+        f"Tick done in {duration}s: collect_pairs={p0.get('pairs', 0)} "
+        f"scan_signals={p1.get('signals', 0)} "
         f"buys={p2.get('buys', 0)} sells={p2.get('sells', 0)} "
         f"sl_tp={p2.get('sl_tp', 0)} trailing={p2.get('trailing', 0)} "
         f"errors={p2.get('errors', 0)}"
     )
     print(json.dumps(summary, indent=2), flush=True)
 
-    # Exit code: 0 even if Phase 1 had 0 signals (that's normal, not error).
-    # Exit 1 only if both phases failed hard.
-    if p1.get("status") == "error" and p2.get("status") == "error":
+    # Exit code: 0 even if Phase 0/1 had issues (non-fatal). Exit 1 only if
+    # all three phases failed hard (extremely unlikely).
+    errors = [p0.get("status"), p1.get("status"), p2.get("status")]
+    if all(s == "error" for s in errors):
         return 1
     return 0
 

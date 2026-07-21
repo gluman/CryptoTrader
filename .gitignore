@@ -45,3 +45,4 @@ Thumbs.db
 *.ex5
 *.ex4logs/
 .env.bak*
+logs/*.log.*

@@ -153,7 +153,21 @@ _DEFAULTS = {
 
 
 def _require_env() -> tuple[str, str]:
-    """Достать BYBIT_API_KEY/SECRET из env, упасть понятно если их нет.
+    """Достать Bybit API key/secret из env с авто-выбором по VPN-статусу.
+
+    ════════════════════════════════════════════════════════════════════════
+    ПРИОРИТЕТ КЛЮЧЕЙ (21.06.2026 FIX — retCode 10010 "Unmatched IP"):
+    ════════════════════════════════════════════════════════════════════════
+    Раньше читался ТОЛЬКО BYBIT_API_KEY/SECRET — один ключ. При смене IP
+    (VPN on/off, ребут сервера) этот ключ переставал работать (10010),
+    и весь compound rebalance падал.
+
+    ТЕПЕРЬ:
+      1. Если заданы BYBIT_API_KEY_VPN_ON / _VPN_OFF — вызывается
+         bybit_key_selector.select_bybit_key(), который try-init'ит
+         каждый ключ через ccxt и возвращает рабочий.
+      2. Если VPN-ключи НЕ заданы — fallback на старую логику
+         (BYBIT_API_KEY/SECRET напрямую).
 
     L7 code review: было `os.environ['KEY']` → KeyError. Теперь
     `os.environ.get('', '')` + RuntimeError с подсказкой пути.
@@ -161,16 +175,75 @@ def _require_env() -> tuple[str, str]:
     Если `BYBIT_TESTNET=true`, берёт BYBIT_TESTNET_API_KEY/SECRET
     (отдельные ключи для testnet.bybit.com). Это позволяет параллельно
     держать mainnet + testnet конфиги без перезаписи основных.
+
+    ═══ RSA-ключ (приоритет над HMAC) ═══
+    Если задан `BYBIT_API_PRIVATE_KEY_PATH` (PEM-файл с RSA-2048 private
+    key в формате PKCS#8) — Bybit Trading Skill v1.4.2 рекомендует
+    использовать RSA signature вместо HMAC. В этом случае:
+      • `key`  = `BYBIT_API_KEY` (публичный ID вида "qR5SvVdu...")
+      • `secret` = путь к RSA PEM-файлу (ccxt сам подпишет запрос)
+    RSA не совместим с dual-key selector (привязка IP к конкретному
+    HMAC-ключу), поэтому при RSA-режиме selector пропускается.
     """
     is_testnet = _is_testnet()
     if is_testnet:
         key = os.environ.get("BYBIT_TESTNET_API_KEY", "").strip()
         secret = os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip()
+        rsa_path = os.environ.get("BYBIT_TESTNET_API_PRIVATE_KEY_PATH", "").strip()
         env_hint = "BYBIT_TESTNET_API_KEY/BYBIT_TESTNET_API_SECRET"
     else:
+        # ═══ 21.06 FIX: VPN dual-key auto-switch ═══
+        # Проверяем наличие VPN-ключей. Если есть — делегируем выбор
+        # bybit_key_selector, который try-init'ит каждый ключ и вернёт
+        # рабочий (тот, чей IP совпадает с текущим IP сервера).
+        vpn_off_key = os.environ.get("BYBIT_API_KEY_VPN_OFF", "").strip()
+        vpn_on_key = os.environ.get("BYBIT_API_KEY_VPN_ON", "").strip()
+        rsa_path = os.environ.get("BYBIT_API_PRIVATE_KEY_PATH", "").strip()
+        env_hint = "BYBIT_API_KEY/BYBIT_API_SECRET"
+
+        # RSA имеет приоритет — пропускаем selector
+        if not rsa_path and (vpn_off_key or vpn_on_key):
+            try:
+                import sys as _sys
+                _src = "/home/andy/CryptoTrader"
+                if _src not in _sys.path:
+                    _sys.path.insert(0, _src)
+                from src.core.bybit_key_selector import select_bybit_key
+                sel_key, sel_secret = select_bybit_key()
+                if sel_key and sel_secret:
+                    log.info("bybit_safe: key_selector → %s...", sel_key[:8])
+                    return sel_key, sel_secret
+                else:
+                    log.warning("bybit_safe: key_selector returned (None, None) "
+                                "— both VPN keys failed, falling back to BYBIT_API_KEY")
+            except Exception as e:
+                log.warning("bybit_safe: key_selector error: %s — "
+                            "falling back to BYBIT_API_KEY", e)
+
         key = os.environ.get("BYBIT_API_KEY", "").strip()
         secret = os.environ.get("BYBIT_API_SECRET", "").strip()
-        env_hint = "BYBIT_API_KEY/BYBIT_API_SECRET"
+    # RSA имеет приоритет (Bybit рекомендует с v5 API)
+    if rsa_path:
+        if not os.path.exists(rsa_path):
+            raise RuntimeError(
+                f"BYBIT_API_PRIVATE_KEY_PATH={rsa_path} не найден. "
+                f"Сгенерируй: openssl genpkey -algorithm RSA "
+                f"-pkeyopt rsa_keygen_bits:2048 -out {rsa_path}"
+            )
+        if not key:
+            raise RuntimeError(
+                f"BYBIT_API_PRIVATE_KEY_PATH задан, но BYBIT_API_KEY пуст. "
+                f"Bybit API Key — публичный ID (вида 'qR5SvVdu...')."
+            )
+        # ═══ R7 FIX: ccxt RSA ожидает содержимое PEM, а не путь к файлу ═══
+        # Прежде возвращали rsa_path (строка вида "/home/.../key.pem"),
+        # но ccxt для RSA-подписи Bybit использует secret = PEM-контент,
+        # а НЕ путь. Подпись из пути → Bybit вернёт ошибку аутентификации.
+        pem_content = open(rsa_path).read()
+        log.info("bybit_safe: RSA auth mode (path=%s, key=%s..., pem_len=%d)",
+                 rsa_path, key[:8], len(pem_content))
+        return key, pem_content
+    # Fallback на HMAC
     if not key or not secret:
         raise RuntimeError(
             f"{env_hint} не заданы. "

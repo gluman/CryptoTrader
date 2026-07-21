@@ -189,6 +189,22 @@ def get_state():
     """)
     sigs_24h = cur.fetchall()
 
+    # R18 (18.06.2026): LLM decisions last 24h — confirmed/rejected + reasoning
+    cur.execute("""
+        SELECT symbol, action, strategy,
+               exit_plan_json->>'llm_confirmed' AS llm_confirmed,
+               exit_plan_json->>'llm_confidence' AS llm_conf,
+               exit_plan_json->>'llm_co_action' AS co_action,
+               exit_plan_json->>'llm_reasoning' AS llm_reasoning,
+               created_at
+        FROM strategy_signals
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+          AND exit_plan_json ? 'llm_confirmed'
+        ORDER BY created_at DESC
+        LIMIT 20
+    """)
+    llm_decs = cur.fetchall()
+
     # compound state
     compound = None
     if STATE_PATH.exists():
@@ -204,6 +220,7 @@ def get_state():
         "sigs_1h": sigs_1h,
         "closed_24h": closed_24h,
         "sigs_24h": sigs_24h,
+        "llm_decs": llm_decs,
         "compound": compound,
     }
 
@@ -305,6 +322,27 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
         lines.append(f"   `{short}`: {summary}")
     if not sig_groups:
         lines.append("   (no signals)")
+
+    # 6. R18: LLM decisions (24h) — Composite MM reasoning
+    llm_decs = state.get("llm_decs", [])
+    if llm_decs:
+        lines.append("")
+        lines.append("🧠 **LLM decisions (24h)**:")
+        for sym, action, strat, confirmed, conf, co, reasoning, ts in llm_decs:
+            icon = "✓" if confirmed == "true" else "✗"
+            short = strat.replace("clone5_", "").replace("_market_maker", "")[:12]
+            conf_val = float(conf) if conf else 0.0
+            # MSK timestamp
+            ts_str = ts.strftime("%H:%M") if ts else "??"
+            lines.append(f"   {icon} `{sym:<10}` {action:<4} conf={conf_val:.2f} "
+                         f"co={co or '?'} @{ts_str} [{short}]")
+            if reasoning:
+                # Show first 150 chars of reasoning
+                r_short = reasoning[:150].replace("\n", " ")
+                lines.append(f"      └ {r_short}")
+    else:
+        lines.append("")
+        lines.append("🧠 **LLM decisions (24h)**: (none — no non-HOLD candidates)")
 
     return "\n".join(lines)
 

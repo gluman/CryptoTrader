@@ -15,14 +15,15 @@ from pathlib import Path
 sys.path.insert(0, '/home/andy/.hermes/scripts')
 from time_utils import now_msk_str, msk_iso_now  # noqa: E402
 
-sys.path.insert(0, '/home/andy/CryptoTrader')
+sys.path.insert(0, '/home/andy/CryptoTrader_main')
 from dotenv import load_dotenv
-load_dotenv('/home/andy/CryptoTrader/.env')
+load_dotenv('/home/andy/CryptoTrader_main/.env')
 
 import psycopg2
 
-DB = dict(host="192.168.0.149", port=5432, database="cryptotrader",
-          user="cryptotrader", password=os.environ["POSTGRES_PASSWORD"])
+# R4+R13 FIX: os.environ.get + единый источник DSN через db_safe.db_dsn()
+from cryptotrader_strategies.db_safe import db_dsn
+DB = db_dsn()
 
 
 def get_live_trades(days=14):

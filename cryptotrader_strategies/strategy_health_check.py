@@ -67,26 +67,29 @@ import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# PGPASSFILE workaround (execute_code маскирует PGPASSWORD)
-PGPASS = '/tmp/.pgpass_ct'
+# PGPASSFILE — постоянное расположение, переживает reboot (code review R8)
+PGPASS = str(Path.home() / '.pgpass')
 
 # Production-стратегии (должны быть активны)
 PROD_STRATEGIES = ['clone5_v7_trailing_only']
-# OHLCV must_haves (8 пар Clone5 v7, из config/settings.yaml)
+# OHLCV must_haves — 8 пар Clone5 v7 (code review R5: убрана XRPUSDT)
 MUST_HAVE_PAIRS = [
-    'XRPUSDT', 'DOGEUSDT', 'TONUSDT', 'SUIUSDT', 'NEARUSDT',
+    'DOGEUSDT', 'TONUSDT', 'SUIUSDT', 'NEARUSDT',
     'SOLUSDT', 'LITUSDT', 'WLDUSDT', 'ADAUSDT',
 ]
 OHLCV_STALE_MIN = 30  # минут — alert если свечи старше
 
 
 def _psql_query(sql: str) -> str:
-    """Запуск psql с PGPASSFILE workaround."""
+    """Запуск psql с PGPASSFILE workaround (R13: хост из db_safe, не хардкод)."""
+    from cryptotrader_strategies.db_safe import db_dsn
+    dsn = db_dsn()
     env = os.environ.copy()
     env['PGPASSFILE'] = PGPASS
     r = subprocess.run(
-        ['psql', '-h', '192.168.0.149', '-U', 'cryptotrader',
-         '-d', 'cryptotrader', '-t', '-A', '-c', sql],
+        ['psql', '-h', dsn['host'], '-p', str(dsn['port']),
+         '-U', dsn['user'], '-d', dsn['database'],
+         '-t', '-A', '-c', sql],
         capture_output=True, text=True, timeout=30, env=env,
     )
     return r.stdout.strip()
@@ -182,13 +185,29 @@ def main() -> int:
     alerts = []
     healthy = True
 
-    for s in sigs:
-        strat = s['strategy']
-        if s['sigs_7d'] == 0:
-            alerts.append(f"{strat}: 0 signals за 7 дней (last: {s['last_ts'] or 'НИКОГДА'})")
+    # ═══ R1 FIX: итерируем по PROD_STRATEGIES (источник истины), а не по результату SQL ═══
+    # GROUP BY не возвращает строку для стратегии с 0 сигналами — поэтому
+    # «sigs_7d == 0» была мёртвой веткой. Теперь проверяем наличие в словаре.
+    by_strat = {s['strategy']: s for s in sigs}
+    for strat in PROD_STRATEGIES:
+        s = by_strat.get(strat)
+        if s is None or s['sigs_7d'] == 0:
+            last_info = s['last_ts'] if s else 'НИКОГДА'
+            alerts.append(f"{strat}: 0 signals за 7 дней (last: {last_info})")
             healthy = False
         else:
-            print(f"  {strat:30} sigs_24h={s['sigs_24h']:3}  sigs_7d={s['sigs_7d']:3}  last={s['last_ts']}", flush=True)
+            # R1: проверка last_signal_ts > 14d (была заявлена в докстринге, но не реализована)
+            from dateutil.parser import isoparse
+            try:
+                last_dt = isoparse(s['last_ts']).replace(tzinfo=timezone.utc)
+                silence_days = (started - last_dt).days
+                if silence_days > 14:
+                    alerts.append(f"{strat}: last signal {silence_days}d ago (>14d threshold)")
+                    healthy = False
+                else:
+                    print(f"  {strat:30} sigs_24h={s['sigs_24h']:3}  sigs_7d={s['sigs_7d']:3}  last={s['last_ts']}  silence={silence_days}d", flush=True)
+            except Exception:
+                print(f"  {strat:30} sigs_24h={s['sigs_24h']:3}  sigs_7d={s['sigs_7d']:3}  last={s['last_ts']}", flush=True)
 
     for strat, c in closed.items():
         if c['closed_7d'] == 0:

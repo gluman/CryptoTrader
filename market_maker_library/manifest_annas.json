@@ -1,0 +1,87 @@
+[
+  {
+    "id": "douglas_zone",
+    "q": "Trading in the Zone Mark Douglas",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "douglas_disciplined",
+    "q": "Disciplined Trader Mark Douglas",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "elder_living",
+    "q": "Trading for a Living Alexander Elder",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "elder_room",
+    "q": "Come Into My Trading Room Alexander Elder",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "dalton_mind",
+    "q": "Mind Over Markets James Dalton",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "harris_exchanges",
+    "q": "Trading and Exchanges Larry Harris",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "chan_algo",
+    "q": "Algorithmic Trading Ernest Chan",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "chan_quant",
+    "q": "Quantitative Trading Ernest Chan",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "lopez_afml",
+    "q": "Advances in Financial Machine Learning de Prado",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "brooks_trends",
+    "q": "Trading Price Action Trends Al Brooks",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "brooks_reversals",
+    "q": "Trading Price Action Reversals Al Brooks",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "murphy_ta",
+    "q": "Technical Analysis Financial Markets John Murphy",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "antonopoulos_bitcoin",
+    "q": "Mastering Bitcoin Andreas Antonopoulos",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "ammous_standard",
+    "q": "Bitcoin Standard Saifedean Ammous",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "lewis_flash",
+    "q": "Flash Boys Michael Lewis",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "weis_trades",
+    "q": "Trades About to Happen David Weis",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "weis_wyckoff2",
+    "q": "Wyckoff 2.0 Ruben Villahermosa",
+    "status": "NO_RESULT"
+  }
+]

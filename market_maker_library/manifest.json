@@ -1,0 +1,158 @@
+[
+  {
+    "id": "wyckoff_tape",
+    "author": "Wyckoff",
+    "title": "Studies in Tape Reading",
+    "q": "wyckoff studies tape reading",
+    "already": "/home/andy/CryptoTrader_main/docs/wyckoff_tape_reading.txt",
+    "status": "ALREADY_HAVE",
+    "size_kb": 207,
+    "txt": "/home/andy/CryptoTrader_main/market_maker_library/txt/wyckoff_tape.txt"
+  },
+  {
+    "id": "wyckoff_methodology_box",
+    "author": "Twomey",
+    "title": "The Wyckoff Methodology in a Box",
+    "q": "wyckoff methodology box twomey",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "weis_wyckoff2",
+    "author": "Weis",
+    "title": "Wyckoff 2.0 Structuring Trades",
+    "q": "david weis wyckoff trades about to happen",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "weis_trades",
+    "author": "Weis",
+    "title": "Trades About to Happen",
+    "q": "weis trades about to happen wyckoff",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "douglas_zone",
+    "author": "Douglas",
+    "title": "Trading in the Zone",
+    "q": "mark douglas trading in the zone",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "douglas_disciplined",
+    "author": "Douglas",
+    "title": "The Disciplined Trader",
+    "q": "mark douglas disciplined trader",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "elder_living",
+    "author": "Elder",
+    "title": "Trading for a Living",
+    "q": "alexander elder trading for a living",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "elder_room",
+    "author": "Elder",
+    "title": "Come Into My Trading Room",
+    "q": "alexander elder come into my trading room",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "dalton_mind",
+    "author": "Dalton",
+    "title": "Mind Over Markets",
+    "q": "james dalton mind over markets",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "harris_exchanges",
+    "author": "Harris",
+    "title": "Trading and Exchanges",
+    "q": "larry harris trading and exchanges",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "chan_algo",
+    "author": "Chan",
+    "title": "Algorithmic Trading",
+    "q": "ernest chan algorithmic trading winning strategies",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "chan_quant",
+    "author": "Chan",
+    "title": "Quantitative Trading",
+    "q": "ernest chan quantitative trading",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "lopez_afml",
+    "author": "López de Prado",
+    "title": "Advances in Financial Machine Learning",
+    "q": "lopez de prado advances financial machine learning",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "brooks_trends",
+    "author": "Brooks",
+    "title": "Trading Price Action Trends",
+    "q": "al brooks trading price action trends",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "brooks_reversals",
+    "author": "Brooks",
+    "title": "Trading Price Action Reversals",
+    "q": "al brooks trading price action reversals",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "nison",
+    "author": "Nison",
+    "title": "Japanese Candlestick Charting",
+    "q": "steve nison japanese candlestick charting techniques",
+    "already": "/home/andy/CryptoTrader_main/docs/nison_candlesticks.txt",
+    "status": "ALREADY_HAVE",
+    "size_kb": 440,
+    "txt": "/home/andy/CryptoTrader_main/market_maker_library/txt/nison.txt"
+  },
+  {
+    "id": "bulkowski",
+    "author": "Bulkowski",
+    "title": "Encyclopedia of Chart Patterns",
+    "q": "bulkowski encyclopedia chart patterns",
+    "already": "/home/andy/CryptoTrader_main/docs/bulkowski_patterns.txt",
+    "status": "ALREADY_HAVE",
+    "size_kb": 2582,
+    "txt": "/home/andy/CryptoTrader_main/market_maker_library/txt/bulkowski.txt"
+  },
+  {
+    "id": "murphy_ta",
+    "author": "Murphy",
+    "title": "Technical Analysis of Financial Markets",
+    "q": "john murphy technical analysis financial markets",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "antonopoulos_bitcoin",
+    "author": "Antonopoulos",
+    "title": "Mastering Bitcoin",
+    "q": "mastering bitcoin antonopoulos",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "ammous_standard",
+    "author": "Ammous",
+    "title": "The Bitcoin Standard",
+    "q": "saifedean ammous bitcoin standard",
+    "status": "NO_RESULT"
+  },
+  {
+    "id": "lewis_flash",
+    "author": "Lewis",
+    "title": "Flash Boys",
+    "q": "michael lewis flash boys",
+    "status": "NO_RESULT"
+  }
+]

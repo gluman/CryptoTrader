@@ -1,0 +1,78 @@
+[
+  {
+    "id": "douglas_zone",
+    "status": "OK",
+    "size_kb": 1630,
+    "identifier": "oceanof-pdf",
+    "kind": "djvu_txt",
+    "title": "Ocean of PDF"
+  },
+  {
+    "id": "douglas_disciplined",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "elder_living",
+    "status": "FAILED"
+  },
+  {
+    "id": "elder_room",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "dalton_mind",
+    "status": "FAILED"
+  },
+  {
+    "id": "harris_exchanges",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "chan_algo",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "chan_quant",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "lopez_afml",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "brooks_trends",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "brooks_reversals",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "murphy_ta",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "antonopoulos_bitcoin",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "ammous_standard",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "lewis_flash",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "weis_trades",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "weis_wyckoff2",
+    "status": "NO_BRAVE"
+  },
+  {
+    "id": "twomey_box",
+    "status": "NO_BRAVE"
+  }
+]

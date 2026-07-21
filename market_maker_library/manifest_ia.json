@@ -1,0 +1,92 @@
+[
+  {
+    "id": "douglas_zone",
+    "q": "title:\"trading in the zone\" AND creator:douglas",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "douglas_disciplined",
+    "q": "title:\"disciplined trader\" AND creator:douglas",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "elder_living",
+    "q": "title:\"trading for a living\" AND creator:elder",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "elder_room",
+    "q": "title:\"come into my trading room\" AND creator:elder",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "dalton_mind",
+    "q": "title:\"mind over markets\" AND creator:dalton",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "harris_exchanges",
+    "q": "title:\"trading and exchanges\" AND creator:harris",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "chan_algo",
+    "q": "title:\"algorithmic trading\" AND creator:chan",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "chan_quant",
+    "q": "title:\"quantitative trading\" AND creator:chan",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "lopez_afml",
+    "q": "title:\"advances in financial machine learning\"",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "brooks_trends",
+    "q": "title:\"price action trends\" AND creator:brooks",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "brooks_reversals",
+    "q": "title:\"price action reversals\" AND creator:brooks",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "murphy_ta",
+    "q": "title:\"technical analysis of the financial markets\" AND creator:murphy",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "antonopoulos_bitcoin",
+    "q": "title:\"mastering bitcoin\" AND creator:antonopoulos",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "ammous_standard",
+    "q": "title:\"bitcoin standard\" AND creator:ammous",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "lewis_flash",
+    "q": "title:\"flash boys\" AND creator:lewis",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "weis_trades",
+    "q": "title:\"trades about to happen\" AND creator:weis",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "weis_wyckoff2",
+    "q": "title:\"wyckoff\" AND creator:villahermosa",
+    "status": "NO_TEXT"
+  },
+  {
+    "id": "twomey_box",
+    "q": "title:\"wyckoff methodology\" AND creator:twomey",
+    "status": "NO_TEXT"
+  }
+]

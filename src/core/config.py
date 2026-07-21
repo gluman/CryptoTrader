@@ -38,10 +38,19 @@ class Config:
         self._data['binance']['api_secret'] = os.getenv('BINANCE_API_SECRET', '')
         self._data['binance']['testnet'] = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
         
-        # Bybit
+        # Bybit — dual-key VPN auto-switch (21.06.2026)
+        # Основной ключ BYBIT_API_KEY задаётся через bybit_key_selector.select_bybit_key()
+        # при инициализации ExecutionAgent. Здесь загружаем ВСЕ варианты:
+        #   - BYBIT_API_KEY_VPN_OFF / _VPN_OFF → для прямого IP сервера
+        #   - BYBIT_API_KEY_VPN_ON  / _VPN_ON  → для VPN-IP
+        #   - BYBIT_API_KEY / BYBIT_API_SECRET → legacy fallback
         self._data.setdefault('bybit', {})
         self._data['bybit']['api_key'] = os.getenv('BYBIT_API_KEY', '')
         self._data['bybit']['api_secret'] = os.getenv('BYBIT_API_SECRET', '')
+        self._data['bybit']['api_key_vpn_on'] = os.getenv('BYBIT_API_KEY_VPN_ON', '')
+        self._data['bybit']['api_secret_vpn_on'] = os.getenv('BYBIT_API_SECRET_VPN_ON', '')
+        self._data['bybit']['api_key_vpn_off'] = os.getenv('BYBIT_API_KEY_VPN_OFF', '')
+        self._data['bybit']['api_secret_vpn_off'] = os.getenv('BYBIT_API_SECRET_VPN_OFF', '')
         self._data['bybit']['testnet'] = os.getenv('BYBIT_TESTNET', 'false').lower() == 'true'
         
         # Bitfinex

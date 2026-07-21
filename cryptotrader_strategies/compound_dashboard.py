@@ -11,15 +11,16 @@ import os, sys, json, argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, '/home/andy/CryptoTrader')
+sys.path.insert(0, '/home/andy/CryptoTrader_main')
 from dotenv import load_dotenv
-load_dotenv('/home/andy/CryptoTrader/.env')
+load_dotenv('/home/andy/CryptoTrader_main/.env')
 
 import psycopg2
 
-DB = dict(host="192.168.0.149", port=5432, database="cryptotrader",
-          user="cryptotrader", password=os.environ.get("POSTGRES_PASSWORD", ""))
-STATE_PATH = Path('/home/andy/CryptoTrader/compound_state.json')
+# R13 FIX: единый источник DSN — db_safe.db_dsn()
+from cryptotrader_strategies.db_safe import db_dsn
+DB = db_dsn()
+STATE_PATH = Path('/home/andy/CryptoTrader_main/compound_state.json')
 
 
 def get_balance():

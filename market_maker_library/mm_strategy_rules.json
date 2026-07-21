@@ -1,0 +1,285 @@
+{
+  "$schema": "mm_strategy_rules_v1",
+  "description": "Структурированные торговые правила, извлечённые из 5 книг Market Maker Library. Каждое правило = источник + формализация + статус в коде v7a.",
+  "generated": "2026-06-18T16:00:00+03:00",
+  "books": {
+    "wyckoff": {
+      "title": "Studies in Tape Reading",
+      "author": "Richard D. Wyckoff",
+      "core_concept": "Composite Operator — невидимый крупный игрок, чьё накопление/распределение двигает цены. Все движения цены объясняются его действиями.",
+      "key_rules": [
+        {
+          "id": "W1",
+          "concept": "Composite Man (Operator)",
+          "rule": "Все ценовые движения объясняются действиями Composite Operator. Он накапливает позицию при падении, распределяет на росте. Retail трейдеры — контрагенты, их стопы = топливо для CO.",
+          "source": "Wyckoff, 'Studies in Tape Reading'",
+          "action": "Анализировать каждый бар через вопрос: что делает Composite Operator сейчас — accumulates, distributes, marks up/down?",
+          "code_mapping": "strategy regime detector: _detect_bullish_hunt = CO accumulating через spring; _detect_bearish_hunt = CO distributing через UTAD",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "W2",
+          "concept": "Accumulation/Distribution phases",
+          "rule": "CO накапливает позицию медленно, в боковике, на падениях. Распределение — на росте, после markup. Фазы: Accumulation → Markup → Distribution → Markdown.",
+          "source": "Wyckoff",
+          "action": "Определять фазу (trading range vs trend) через BB width + ATR. В trading range — искать springs/UTADs. В markup/markdown — не торговать reversal.",
+          "code_mapping": "R17 regime detector: BB width > 1.0% = vol_high (trailing ON). Нет определения фазы (range vs trend).",
+          "status": "PARTIAL — regime детектор только vol_high/low, нет accumulation/distribution фазы"
+        },
+        {
+          "id": "W3",
+          "concept": "Spring (ложный пробой поддержки вниз + возврат)",
+          "rule": "Spring — последний слив слабых рук перед markup. Цена пробивает поддержку (swing low), закрывается выше. Объём высокий. Чем глубже spring, тем сильнее signal.",
+          "source": "Wyckoff; Bulkowski подтверждает: Double Bottom bust rate = 14%",
+          "action": "BUY signal. SL ниже wick spring'а. TP = recent swing high.",
+          "code_mapping": "_detect_spring_pattern() + _detect_bullish_hunt()",
+          "status": "IMPLEMENTED — sweep_threshold (0.3-0.8%), wick_body_min_ratio, vol_spike check"
+        },
+        {
+          "id": "W4",
+          "concept": "UTAD (Upthrust After Distribution — ложный пробой сопротивления вверх + возврат)",
+          "rule": "UTAD — зеркальный spring. Цена пробивает сопротивление, закрывается ниже. CO раздаёт позицию retail'у на эйфории.",
+          "source": "Wyckoff; Bulkowski: H&S Top bust = 18.8%",
+          "action": "SELL signal. SL выше wick UTAD. TP = recent swing low.",
+          "code_mapping": "_detect_utad_pattern() + _detect_bearish_hunt()",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "W5",
+          "concept": "Effort vs Result (VSA)",
+          "rule": "Высокий объём (effort) + маленький спред (result) = absorption. CO поглощает чужие ордера. High effort + large result = continuation. Low effort + large result = no demand/supply = разворот.",
+          "source": "Wyckoff VSA; Tom Williams",
+          "action": "ev_ratio = (vol/vol_avg) / (spread_pct / 0.5). ev_ratio >= 2.0 → absorption detected → score bonus +0.10.",
+          "code_mapping": "_vsa_effort_vs_result()",
+          "status": "IMPLEMENTED — ev_ratio computed, bonus applied"
+        },
+        {
+          "id": "W6",
+          "concept": "No Demand / No Supply bars",
+          "rule": "No Demand: маленький спред, низкий объём, down-close после uptrend = CO не покупает, reversal signal. No Supply: зеркально — up-close после downtrend.",
+          "source": "Wyckoff VSA",
+          "action": "Проверять предыдущий бар. Если prev = no_demand/no_supply → bonus +0.05 к текущему сигналу.",
+          "code_mapping": "_vsa_no_demand_bar() / _vsa_no_supply_bar()",
+          "status": "IMPLEMENTED — проверяется prev_bar"
+        },
+        {
+          "id": "W7",
+          "concept": "Climax volume",
+          "rule": "Объём > 3× avg + широкий спред = кульминация. CO завершает move, разворот вероятен.",
+          "source": "Wyckoff VSA",
+          "action": "vol/vol_avg >= 3.0 AND spread > 0.5% → climax → score bonus +0.15.",
+          "code_mapping": "_vsa_climax()",
+          "status": "IMPLEMENTED"
+        }
+      ]
+    },
+    "douglas": {
+      "title": "The Disciplined Trader",
+      "author": "Mark Douglas",
+      "core_concept": "Розничные трейдеры теряют из-за страха (потерять деньги, быть неправым, упустить возможность). CO эксплуатирует эти страхи. Чтобы торговать как CO — нужно думать в вероятностях и принимать риск.",
+      "key_rules": [
+        {
+          "id": "D1",
+          "concept": "Think in probabilities, not certainties",
+          "rule": "Каждая сделка — независимое событие с вероятностным исходом. Edge работает на серии из 20+ сделок, не на одной. Не пытайся 'быть правым' в каждой сделке.",
+          "source": "Douglas, 'The Disciplined Trader'",
+          "action": "LLM prompt: оценивать confidence как вероятность, не как гарантию. Не блокировать сделку из-за 'недостаточной уверенности' — исполнять при confidence >= threshold.",
+          "code_mapping": "min_confidence=0.50, min_score_to_trade=0.55",
+          "status": "IMPLEMENTED в thresholds, но LLM должен использовать это в reasoning"
+        },
+        {
+          "id": "D2",
+          "concept": "Accept the loss before entering",
+          "rule": "Перед входом определи точку, где ты признаешь ошибку (stop loss). Принимай этот риск психологически. Если не можешь принять — не входи.",
+          "source": "Douglas",
+          "action": "SL всегда вычисляется из структуры (wick low/high), не из произвольного %.",
+          "code_mapping": "sl_price = l * 0.995 (bullish) / h * 1.005 (bearish)",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "D3",
+          "concept": "Fear of missing opportunity = trap",
+          "rule": "Страх упустить движение (FOMO) заставляет retail покупать на хаях. CO создаёт UTAD, чтобы спровоцировать FOMO и продать им. Если ты чувствуешь FOMO — ты на стороне retail.",
+          "source": "Douglas",
+          "action": "LLM prompt: НЕ входить после сильного движения (>2% за 1 бар). Это UTAD/spring зона. Ждать retracement.",
+          "code_mapping": "Нет фильтра FOMO. Сигналы берутся при любом размере бара.",
+          "status": "MISSING — нужен bar_return фильтр"
+        },
+        {
+          "id": "D4",
+          "concept": "Cut losses short, let profits run",
+          "rule": "Убыточные сделки закрываются по SL. Прибыльные — trailing stop, не фиксировать раньше времени.",
+          "source": "Douglas",
+          "action": "Trailing stop обязателен в vol_high режиме.",
+          "code_mapping": "R17 trailing ON при vol_high (BB width > 1.0%)",
+          "status": "IMPLEMENTED"
+        }
+      ]
+    },
+    "elder": {
+      "title": "Trading for a Living",
+      "author": "Alexander Elder",
+      "core_concept": "Три кита: психология + market analysis + money management. 2% Rule ограничивает риск на сделку. Triple Screen фильтрует сигналы по нескольким TF.",
+      "key_rules": [
+        {
+          "id": "E1",
+          "concept": "2% Rule — max risk per trade",
+          "rule": "Никогда не рискуй больше 2% капитала в одной сделке. Risk = (entry - stop) × position_size. На $21 балансе = $0.42 max loss.",
+          "source": "Elder, Chapter 10",
+          "action": "position_size = (equity × 0.02) / sl_pct. При equity=$21, sl_pct=0.5% → pos = $0.42/0.005 = $84. Но реально $5/pos с SL 0.5% = $0.025 risk — безопасно.",
+          "code_mapping": "compound_state.json: $7/pos, sl_pct=0.5% → risk = $0.035 = 0.17% equity. Within 2% rule.",
+          "status": "IMPLEMENTED — risk per trade = 0.17% equity, well within 2%"
+        },
+        {
+          "id": "E2",
+          "concept": "Triple Screen — multi-TF confirmation",
+          "rule": "Стратегический TF (тренд) → тактический TF (pullback) → вход (entry). Не входить против старшего TF.",
+          "source": "Elder, Chapter 43",
+          "action": "5m стратегический тренд → 5m тактический паттерн → вход. Или 1h тренд → 5m вход.",
+          "code_mapping": "Нет multi-TF. Только 5m.",
+          "status": "MISSING — нужен старший TF (1h или 15m) фильтр"
+        },
+        {
+          "id": "E3",
+          "concept": "Elder-Ray Bear/Bull Power",
+          "rule": "Bear Power = Low - EMA(13). Bull Power = High - EMA(13). Когда Bear Power < 0 но rising → CO накапливает. Bull Power > 0 но falling → CO распределяет.",
+          "source": "Elder",
+          "action": "Добавить Elder-Ray как дополнительный фильтр: bear_power rising → long bias; bull_power falling → short bias.",
+          "code_mapping": "Нет Elder-Ray.",
+          "status": "MISSING — опциональный enhancement"
+        },
+        {
+          "id": "E4",
+          "concept": "Force Index",
+          "rule": "Force Index = Volume × (Close - Prev Close). FI > 0 и rising = bullish accumulation. FI < 0 и falling = bearish distribution. Дивергенция FI vs price = разворот.",
+          "source": "Elder",
+          "action": "Force Index 2-period EMA. Положительный + растущий → подтверждение long.",
+          "code_mapping": "Нет Force Index.",
+          "status": "MISSING — опциональный enhancement"
+        }
+      ]
+    },
+    "nison": {
+      "title": "Japanese Candlestick Charting Techniques",
+      "author": "Steve Nison",
+      "core_concept": "Свечные паттерны показывают психологию текущего бара. Объём подтверждает значимость паттерна.",
+      "key_rules": [
+        {
+          "id": "N1",
+          "concept": "Hammer (бычий разворот) = spring bar",
+          "rule": "Длинная нижняя тень (>= 2× body), маленькое тело сверху. Появляется после падения. Высокий объём = подтверждение.",
+          "source": "Nison, Chapter 5",
+          "action": "wick_ratio >= 1.0 (тень >= тела) + vol_spike >= 1.3 → bullish hunt confirmed.",
+          "code_mapping": "wick_body_min_ratio = 1.0 (v6) / 0.8 (v7 per-pair), min_volume_spike = 1.3",
+          "status": "IMPLEMENTED — wick_ratio + vol_spike checks"
+        },
+        {
+          "id": "N2",
+          "concept": "Shooting Star (медвежий разворот) = UTAD bar",
+          "rule": "Длинная верхняя тень, маленькое тело снизу. После роста. Высокий объём = подтверждение.",
+          "source": "Nison",
+          "action": "wick_ratio >= 1.0 + vol_spike >= 1.3 → bearish hunt.",
+          "code_mapping": "_calculate_wick_ratio(bar, 'short')",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "N3",
+          "concept": "Volume confirms candle",
+          "rule": "'As long as volume increases, the current price trend should continue.' Объём растёт → паттерн значимый. Объём падает → паттерн слабый.",
+          "source": "Nison",
+          "action": "vol_spike (current vol / 20-bar avg) must be >= 1.3 for signal.",
+          "code_mapping": "min_volume_spike = 1.3, vol_spike check in _detect_*_hunt()",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "N4",
+          "concept": "Doji — indecision at key level",
+          "rule": "Открытие = закрытие (или почти). После сильного движения = разворот. В середине range = нейтральный.",
+          "source": "Nison",
+          "action": "Не используем напрямую, но small body + long wick = как doji + hammer комбинация.",
+          "code_mapping": "Wick ratio check покрывает эту логику неявно.",
+          "status": "PARTIAL — неявно через wick_ratio"
+        },
+        {
+          "id": "N5",
+          "concept": "Engulfing patterns at sweep",
+          "rule": "Bullish Engulfing: большой бычий бар полностью поглощает предыдущий медвежий. При sweep = сильный absorption signal.",
+          "source": "Nison",
+          "action": "Добавить engulfing check: current bar fully engulfs prev bar + sweep = +0.10 score.",
+          "code_mapping": "Нет engulfing detection.",
+          "status": "MISSING — potential enhancement"
+        }
+      ]
+    },
+    "bulkowski": {
+      "title": "Encyclopedia of Chart Patterns (3rd Edition)",
+      "author": "Thomas Bulkowski",
+      "core_concept": "Статистический анализ паттернов. Bust rates (пробои, которые разворачиваются) = основа для контр-торговли как CO.",
+      "key_rules": [
+        {
+          "id": "B1",
+          "concept": "Double Bottom bust = Spring",
+          "rule": "14% Double Bottoms bust — цена пробивает второй low, затем разворачивается вверх. Это = Wyckoff Spring. Bust rate 14% = probability of Spring success.",
+          "source": "Bulkowski, Double Bottom chapter",
+          "action": "Когда цена пробивает recent swing low и закрывается выше → Spring signal. Score bonus +0.20.",
+          "code_mapping": "_detect_spring_pattern() → bulkowski_spring_bonus = 0.20",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "B2",
+          "concept": "Head & Shoulders Top bust = UTAD",
+          "rule": "18.8% H&S Tops fail — цена пробивает выше, затем разворачивается вниз. = Wyckoff UTAD.",
+          "source": "Bulkowski, H&S Top chapter",
+          "action": "Когда цена пробивает recent swing high и закрывается ниже → UTAD signal. Score bonus +0.20.",
+          "code_mapping": "_detect_utad_pattern() → bulkowski_utad_bonus = 0.20",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "B3",
+          "concept": "Breakout confirmation",
+          "rule": "Valid breakout: close above resistance, not just intraday spike. Throwback/pullback rate = 53-59%. After confirmed breakout, expect throwback → second entry opportunity.",
+          "source": "Bulkowski",
+          "action": "Проверять close (не high/low) для breakout. Текущий код уже использует close vs swing level.",
+          "code_mapping": "c > swing_low (bullish) / c < swing_high (bearish) — close-based",
+          "status": "IMPLEMENTED"
+        },
+        {
+          "id": "B4",
+          "concept": "Pattern failure rate by market condition",
+          "rule": "Bull market bust rates differ from bear market. В bear market Double Bottom failure = 10.2% (vs 26.3% overall). Паттерны надежнее в bear market.",
+          "source": "Bulkowski, performance chapters",
+          "action": "Определять bull/bear по старшему TF. В bear market — повышать confidence на bullish springs. В bull market — повышать на bearish UTADs (counter-trend).",
+          "code_mapping": "Нет bull/bear фильтра.",
+          "status": "MISSING — нужен 1h/4h trend фильтр для market condition"
+        },
+        {
+          "id": "B5",
+          "concept": "Volume spike on breakout",
+          "rule": "Объём на breakout должен быть выше среднего. Low volume breakout = higher failure rate.",
+          "source": "Bulkowski",
+          "action": "vol_spike >= 1.3 (уже реализовано). Bulkowski предлагает >= 1.5 для strong confirmation.",
+          "code_mapping": "min_volume_spike = 1.3",
+          "status": "IMPLEMENTED — но можно повысить до 1.5 для stricter quality"
+        }
+      ]
+    }
+  },
+  "gaps_summary": {
+    "implemented": ["W1","W3","W4","W5","W6","W7","D1","D2","D4","E1","N1","N2","N3","B1","B2","B3","B5"],
+    "partial": ["W2","N4"],
+    "missing": ["D3","E2","E3","E4","N5","B4"],
+    "missing_descriptions": {
+      "D3": "FOMO filter — НЕ входить после сильного движения (>2%/bar)",
+      "E2": "Triple Screen — multi-TF confirmation (1h trend + 5m entry)",
+      "E3": "Elder-Ray Bear/Bull Power — дополнительный momentum фильтр",
+      "E4": "Force Index — volume-weighted momentum confirmation",
+      "N5": "Engulfing pattern detection at sweep = absorption signal",
+      "B4": "Bull/Bear market condition filter — повышать confidence по тренду"
+    },
+    "priority_for_llm_prompt": {
+      "high": ["D3 (FOMO filter)", "E2 (multi-TF)", "B4 (market condition)"],
+      "medium": ["N5 (engulfing)", "W2 (phase detection)"],
+      "low": ["E3 (Elder-Ray)", "E4 (Force Index)"]
+    }
+  }
+}

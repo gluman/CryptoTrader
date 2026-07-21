@@ -20,9 +20,9 @@ import os, sys, json, argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, '/home/andy/CryptoTrader')
+sys.path.insert(0, '/home/andy/CryptoTrader_main')
 from dotenv import load_dotenv
-load_dotenv('/home/andy/CryptoTrader/.env')
+load_dotenv('/home/andy/CryptoTrader_main/.env')
 
 import ccxt
 
@@ -38,7 +38,7 @@ TIERS = [
 ]
 MAX_POS = 30  # per-pair exposure cap
 MIN_POS = 1
-CONFIG_PATH = Path('/home/andy/CryptoTrader/compound_state.json')
+CONFIG_PATH = Path('/home/andy/CryptoTrader_main/compound_state.json')
 
 
 def get_tier(balance: float) -> dict:
@@ -51,8 +51,12 @@ def get_tier(balance: float) -> dict:
     return {'tier': chosen, 'pos_usdt': pos}
 
 
-def get_bybit_balance() -> float:
-    """Получить USDT баланс на Bybit (linear)."""
+def get_bybit_balance():
+    """Получить USDT баланс на Bybit (linear).
+    
+    R2 FIX: возвращает None при ошибке API (не 0.0 — неотличимо от пустого счёта).
+    Вызывающий код обязан проверять None перед использованием.
+    """
     try:
         from cryptotrader_strategies.bybit_safe import bybit_exchange
         ex = bybit_exchange(with_auth=True)
@@ -62,7 +66,7 @@ def get_bybit_balance() -> float:
         return float(free)
     except Exception as e:
         print(f"ERROR fetching balance: {e}", flush=True)
-        return 0.0
+        return None  # R2: None = «неизвестно», НЕ 0.0
 
 
 def load_state() -> dict:
@@ -84,6 +88,9 @@ def save_state(state: dict):
 
 def cmd_status():
     bal = get_bybit_balance()
+    if bal is None:
+        print("ERROR: balance unavailable (API error), cannot determine tier", flush=True)
+        return {'balance': None, 'pos_usdt': None, 'tier': 'unknown'}
     tier = get_tier(bal)
     state = load_state()
     print(f"=== Compound Status ===", flush=True)
@@ -124,6 +131,10 @@ def cmd_simulate():
 
 def cmd_rebalance(force=False):
     bal = get_bybit_balance()
+    # R2 FIX: не ребалансить при ошибке API (None) или невалидном балансе
+    if bal is None or bal <= 0.0:
+        print(f"Balance unavailable/zero ({bal}) — skip rebalance (no state mutation)", flush=True)
+        return
     tier = get_tier(bal)
     state = load_state()
     delta = abs(tier['pos_usdt'] - state['current_pos_usdt'])

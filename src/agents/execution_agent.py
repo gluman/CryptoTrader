@@ -34,12 +34,30 @@ class ExecutionAgent(BaseAgent):
         self.trailing_stop_enabled = risk_cfg.get('trailing_stop_enabled', True)
         self.trailing_activation_pct = risk_cfg.get('trailing_stop_activation_percent', 1.5)
         self.trailing_distance_pct = risk_cfg.get('trailing_stop_distance_percent', 1.0)
+        # ═══ R23 (08.07.2026): FEE BUFFER константа ═══
+        # Bybit linear fee = 0.055% per side × 2 = 0.11% round-trip.
+        # SL/TP calculations должны учитывать это. Иначе SL hit = gross - fee,
+        # что всегда создаёт микро-убыток даже при микро-прибыли.
+        # 0.20% buffer покрывает fee (0.11%) + slippage (0.05%) + safety (0.04%).
+        self.fee_buffer_pct = 0.20
+        self.breakeven_offset_pct = risk_cfg.get('breakeven_offset_percent', 0.15)
         # Scalp defenses (set in settings.yaml under agents.risk)
         # FIX [Tolya 2026-05-27]: max(1, ...) prevents 0-value which blocks ALL signals
         # (open_cnt >= 0 is always True when max_open=0, making position_cap unreachable)
         self.max_open_positions_total = max(1, risk_cfg.get('max_open_positions_total', 1))
         self.daily_max_loss_usd = risk_cfg.get('daily_max_loss_usd', 2.0)
         self.sl_cooldown_seconds = risk_cfg.get('sl_cooldown_seconds', 300)
+
+        # ──────────────────────────────────────────────────────────────────
+        # Правило "БЕЗУБЫТОК" (BE): если прибыль >= breakeven_activation_pct,
+        # SL переносится в entry_price ± offset (offset покрывает комиссии).
+        # Срабатывает ОДНОКРАТНО на позицию (флаг breakeven_activated в БД).
+        # ВАЖНО: работает ДО trailing-блока, чтобы позиция в BE раньше, чем
+        # trailing (-1% от цены) начнёт тащить SL.
+        # ──────────────────────────────────────────────────────────────────
+        self.breakeven_enabled = risk_cfg.get('breakeven_enabled', True)
+        self.breakeven_activation_pct = risk_cfg.get('breakeven_activation_percent', 0.20)
+        self.breakeven_offset_pct = risk_cfg.get('breakeven_offset_percent', 0.03)
 
     def _adaptive_sl_tp_pct(self, symbol: str, exchange: str = 'bybit') -> Tuple[float, float, str]:
         """Return (sl_pct, tp_pct, note) — ATR-based on latest 5m bars, with floor.
@@ -389,11 +407,16 @@ class ExecutionAgent(BaseAgent):
             if qty < 0.01:
                 return {'error': f'Qty {qty:.4f} below min 0.01'}
             order = ccxt_bybit.create_order(sym, 'market', 'buy', qty)
+            # FIX 06.07.2026: order.get('filled') may return None if Bybit ccxt doesn't
+            # populate 'filled' on initial response — use 'or qty' fallback, NOT default arg
+            # (default doesn't fire when key exists with None value).
+            filled = order.get('filled')
+            avg = order.get('average')
             return {
                 'retCode': 0,
                 'orderId': order.get('id'),
-                'executed_qty': float(order.get('filled', qty)),
-                'avgPrice': float(order.get('average', price)),
+                'executed_qty': float(filled) if filled is not None else float(qty),
+                'avgPrice': float(avg) if avg is not None else float(price),
             }
         except Exception as e:
             return {'error': str(e)}
@@ -406,11 +429,13 @@ class ExecutionAgent(BaseAgent):
         try:
             sym = symbol.upper().replace('USDT', '/USDT:USDT')
             order = ccxt_bybit.create_order(sym, 'market', 'sell', quantity)
+            filled = order.get('filled')
+            avg = order.get('average')
             return {
                 'retCode': 0,
                 'orderId': order.get('id'),
-                'executed_qty': float(order.get('filled', quantity)),
-                'avgPrice': float(order.get('average', 0)),
+                'executed_qty': float(filled) if filled is not None else float(quantity),
+                'avgPrice': float(avg) if avg is not None else 0.0,
             }
         except Exception as e:
             return {'error': str(e)}
@@ -472,12 +497,18 @@ class ExecutionAgent(BaseAgent):
             if isinstance(tp3_node, dict) and tp3_node.get("price_pct"):
                 tp_pct = float(tp3_node["price_pct"])
 
+        # ═══ R23 (08.07.2026): Fee-aware SL/TP calculation ═══
+        # SL ниже entry на (sl_pct + fee_buffer) — реальная потеря при hit = sl_pct,
+        # т.к. fee_buffer покрывает round-trip 0.11%.
+        # TP выше entry на (tp_pct + fee_buffer) — реальная прибыль при hit = tp_pct.
+        sl_buf = sl_pct + self.fee_buffer_pct
+        tp_buf = tp_pct + self.fee_buffer_pct
         if side.upper() == 'SHORT':
-            stop_loss = entry_price * (1 + sl_pct / 100)
-            take_profit = entry_price * (1 - tp_pct / 100)
+            stop_loss = entry_price * (1 + sl_buf / 100)
+            take_profit = entry_price * (1 - tp_buf / 100)
         else:
-            stop_loss = entry_price * (1 - sl_pct / 100)
-            take_profit = entry_price * (1 + tp_pct / 100)
+            stop_loss = entry_price * (1 - sl_buf / 100)
+            take_profit = entry_price * (1 + tp_buf / 100)
 
         # Validate quantity — reject zero/negative
         if quantity <= 0:
@@ -616,15 +647,22 @@ class ExecutionAgent(BaseAgent):
                     pos.lowest_price = Decimal(str(current_price))
                 
                 # Trailing stop logic
+                # R23: trailing-distance должен включать fee buffer.
+                # distance_pct = trailing_distance_pct (effective) - fee_buffer_pct
+                # Формула: trailing_price = current * (1 - (effective_dist)/100)
+                #   effective_dist = trailing_distance_pct (raw config) — fee_buffer
+                # Если raw=0.50% и fee_buffer=0.20%, effective=0.30%, реальный loss при hit = 0.30%.
                 if self.trailing_stop_enabled and not pos.trailing_stop_activated:
                     if pnl_pct >= self.trailing_activation_pct:
-                        trailing_price = current_price * (1 - self.trailing_distance_pct / 100)
+                        effective_dist = max(0.0, self.trailing_distance_pct - self.fee_buffer_pct)
+                        trailing_price = current_price * (1 - effective_dist / 100)
                         pos.trailing_stop_activated = True
                         pos.trailing_stop_price = Decimal(str(trailing_price))
-                        self.log('info', f"Trailing stop activated for {symbol} @ ${trailing_price:.4f}")
-                
+                        self.log('info', f"Trailing stop activated for {symbol} @ ${trailing_price:.4f} (eff_dist={effective_dist:.2f}% incl fee_buffer={self.fee_buffer_pct:.2f}%)")
+
                 if pos.trailing_stop_activated:
-                    new_trailing = current_price * (1 - self.trailing_distance_pct / 100)
+                    effective_dist = max(0.0, self.trailing_distance_pct - self.fee_buffer_pct)
+                    new_trailing = current_price * (1 - effective_dist / 100)
                     if new_trailing > float(pos.trailing_stop_price):
                         pos.trailing_stop_price = Decimal(str(new_trailing))
                 
@@ -1282,6 +1320,46 @@ class ExecutionAgent(BaseAgent):
                 # Update position prices (also updates local trailing state)
                 self.update_position_prices(symbol, current_price)
 
+                # ══════════════════════════════════════════════════════════════════
+                # BE-СТОП (breakeven, Босс 04.07.2026): если прибыль >= +0.2%
+                # → переносим SL в entry_price ± offset (комиссии ~0.03%).
+                # ──────────────────────────────────────────────────────────────────
+                # ПРАВИЛО (июль 2026): безубыток ставим РАНЬШЕ trailing-логики,
+                # чтобы при малейшем откате позиция не закрывалась с убытком.
+                # Trailing (отдельная механика) продолжает работать ПОСЛЕ BE.
+                #
+                # ЛОГИКА:
+                #   • pnl_pct >= +breakeven_activation_pct (default +0.20%)
+                #   • breakeven_activated в БД ещё False (one-shot per position)
+                #   • новый SL = entry × (1 ± offset_pct/100) (LONG: +offset, SHORT: -offset)
+                #   • новый SL лучше текущего (LONG: выше; SHORT: ниже)
+                #
+                # ЭФФЕКТ: при развороте цены назад к entry, сделка закрывается
+                # в BE ± маленькая прибыль (покрытие taker fee ~0.055% × 2
+                # на linear futures с кросс-маржой).
+                #
+                # СМ. ТАКЖЕ: skill bybit-trailing-stop (программный trailing).
+                # ══════════════════════════════════════════════════════════════════
+                if self.breakeven_enabled and pos['market_type'] == 'linear':
+                    try:
+                        be_result = self._apply_breakeven_stop(
+                            pos=pos,
+                            current_price=current_price,
+                            ccxt_bybit=ccxt_bybit,
+                            is_bybit=is_bybit,
+                        )
+                        if be_result.get('applied'):
+                            details.append({
+                                'type': 'BREAKEVEN',
+                                'symbol': symbol,
+                                'old_sl': be_result.get('old_sl'),
+                                'new_sl': be_result.get('new_sl'),
+                                'pnl_pct': be_result.get('pnl_pct'),
+                            })
+                    except Exception as be_err:
+                        # BE-фикс НЕ должен ломать основной monitoring-цикл.
+                        self.log('warning', f'breakeven stop {symbol} failed: {be_err}')
+
                 # === Multi-level TP partial-close + max-hold ===
                 tp_partials = self._check_and_execute_partial_tps(pos, current_price, ex)
                 if tp_partials:
@@ -1308,7 +1386,12 @@ class ExecutionAgent(BaseAgent):
                                 ).first()
                                 if db_pos:
                                     trailing_activated = db_pos.trailing_stop_activated
-                                    trailing_dist_pct = self.trailing_distance_pct
+                                    # R23 (08.07.2026): trailing distance теперь fee-aware.
+                                    # trailing_distance_pct (config) = raw distance from peak.
+                                    # Реальный loss при hit = raw - fee_buffer (raw absorbes fee).
+                                    # Если хотим "net distance 0.30%" от пика → raw=0.50%, fee_buffer=0.20%.
+                                    trailing_dist_pct_raw = self.trailing_distance_pct
+                                    trailing_dist_pct = max(0.0, trailing_dist_pct_raw - self.fee_buffer_pct)
                                     trailing_activation = self.trailing_activation_pct
                                     trailing_dist_price = round(current_price * (trailing_dist_pct / 100), 4)
                                     bybit_side = 'Sell' if side == 'SHORT' else 'Buy'
@@ -1434,7 +1517,158 @@ class ExecutionAgent(BaseAgent):
                 self.log('error', f"SL/TP check failed for {pos['symbol']}: {e}")
 
         return {'triggered': triggered, 'trailing_updated': trailing_updated, 'details': details}
-    
+
+    def _apply_breakeven_stop(
+        self,
+        pos: Dict,
+        current_price: float,
+        ccxt_bybit,
+        is_bybit: bool,
+    ) -> Dict:
+        """Перенос SL в безубыток при достижении breakeven_activation_pct.
+
+        ЗАЧЕМ:
+          Защита прибыли на ранней стадии. По команде Босса (04.07.2026): если
+          позиция дошла до +0.2%, переносим SL на entry_price ± offset, чтобы
+          при откате сделка закрылась без убытка (или с микро-прибылью).
+
+        ЧТО ДЕЛАЕТ:
+          1. Достаёт entry_price, side, текущий SL из БД (exit_plan_json).
+          2. Считает pnl_pct по текущей цене.
+          3. Если pnl_pct >= self.breakeven_activation_pct И флаг
+             breakeven_activated ещё False:
+             • LONG: new_sl = entry × (1 + offset_pct/100)
+             • SHORT: new_sl = entry × (1 - offset_pct/100)
+             • Если new_sl лучше текущего SL → отправляет Bybit /v5/position/trading-stop,
+               обновляет positions.stop_loss, ставит флаг breakeven_activated=True.
+
+        ПОЧЕМУ offset_pct = 0.03%:
+          Bybit taker fee на linear ≈ 0.055% × 2 (open+close) ≈ 0.11%. SL на entry
+          даст чистый минус на комиссиях. +0.03% сверху — компенсация.
+
+        ВАЖНО:
+          • НЕ перетирает trailing_stop_price — это отдельный механизм (выше).
+          • НЕ вызывается повторно — флаг в exit_plan_json блокирует.
+          • Если текущий SL уже в зоне BE/BE+ → no-op (не дёргаем Bybit).
+
+        СМ. ТАКЖЕ: skill bybit-trailing-stop (программный trailing).
+        """
+        symbol = pos['symbol']
+        side = (pos.get('side') or 'LONG').upper()
+        entry_price = float(pos.get('entry_price', 0) or 0)
+        if entry_price <= 0 or current_price <= 0:
+            return {'applied': False, 'reason': 'invalid_prices'}
+
+        # pnl_pct по текущей цене
+        if side == 'SHORT':
+            pnl_pct = (entry_price - current_price) / entry_price * 100
+        else:
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+
+        if pnl_pct < self.breakeven_activation_pct:
+            return {'applied': False, 'reason': 'below_threshold',
+                    'pnl_pct': round(pnl_pct, 4),
+                    'threshold': self.breakeven_activation_pct}
+
+        # Достаём текущий SL и флаг из БД
+        from src.core.database import Position
+        with self.db.get_session() as sess:
+            db_pos = sess.query(Position).filter_by(
+                symbol=symbol, status='OPEN'
+            ).first()
+            if not db_pos:
+                return {'applied': False, 'reason': 'no_db_position'}
+
+            old_sl = float(db_pos.stop_loss) if db_pos.stop_loss else None
+
+            # Проверка флага one-shot через exit_plan_json (там лежит breakeven_activated)
+            exit_plan = db_pos.exit_plan_json or {}
+            if not isinstance(exit_plan, dict):
+                exit_plan = {}
+            if exit_plan.get('breakeven_activated'):
+                return {'applied': False, 'reason': 'already_activated',
+                        'old_sl': old_sl}
+
+            # R23 (08.07.2026): BE offset now fee-aware.
+            # offset = max(breakeven_offset_pct_from_config, fee_buffer_pct)
+            #   • fee_buffer_pct (0.20%) covers fee round-trip (0.11%) + slippage (0.05%) + safety (0.04%).
+            #   • Pure config offset 0.15% < fee_buffer → use 0.20% as min.
+            offset = max(self.breakeven_offset_pct, self.fee_buffer_pct)
+            if side == 'SHORT':
+                new_sl = round(entry_price * (1 - offset / 100), 6)
+            else:
+                new_sl = round(entry_price * (1 + offset / 100), 6)
+
+            # Защита: новый SL должен быть ЛУЧШЕ текущего (LONG: выше; SHORT: ниже)
+            if old_sl is not None:
+                if side == 'LONG' and new_sl <= old_sl:
+                    return {'applied': False, 'reason': 'sl_not_better',
+                            'old_sl': old_sl, 'new_sl': new_sl}
+                if side == 'SHORT' and new_sl >= old_sl:
+                    return {'applied': False, 'reason': 'sl_not_better',
+                            'old_sl': old_sl, 'new_sl': new_sl}
+
+            # ────────────────────────────────────────────────────────────────
+            # Отправляем на биржу. ТОЛЬКО Bybit linear — spot не поддерживает
+            # trading-stop endpoint, и для других exchange (binance/bitfinex)
+            # правило BE пока не активируем.
+            # ────────────────────────────────────────────────────────────────
+            exchange_ok = False
+            if is_bybit and ccxt_bybit is not None:
+                try:
+                    # SL в формате Bybit V5: цена строкой.
+                    sl_str = str(new_sl)
+                    sym_ccxt = symbol.upper().replace('USDT', '/USDT:USDT')
+                    body = {
+                        'category': 'linear',
+                        'symbol': sym_ccxt,
+                        'stopLoss': sl_str,
+                        'positionIdx': 0,
+                    }
+                    # НЕ передаём trailingStop/takeProfit — иначе перетрём TP.
+                    # Передаём ТОЛЬКО stopLoss, Bybit понимает это как "обновить SL".
+                    resp = ccxt_bybit.private_post_v5_position_trading_stop(body)
+                    ret_code = (resp or {}).get('retCode', -1)
+                    if ret_code == 0:
+                        exchange_ok = True
+                    else:
+                        self.log('warning',
+                                 f'breakeven SL {symbol} exchange retCode={ret_code} '
+                                 f'retMsg={(resp or {}).get("retMsg")}')
+                except Exception as ex_err:
+                    self.log('warning', f'breakeven SL {symbol} exchange call failed: {ex_err}')
+
+            if not exchange_ok:
+                # Не смогли отправить — НЕ ставим флаг, попробуем на след. тике.
+                return {'applied': False, 'reason': 'exchange_rejected',
+                        'new_sl': new_sl}
+
+            # ────────────────────────────────────────────────────────────────
+            # Биржа приняла — обновляем БД и ставим one-shot флаг.
+            # ────────────────────────────────────────────────────────────────
+            db_pos.stop_loss = Decimal(str(new_sl))
+            # trailing_stop_price НЕ трогаем — это отдельный механизм,
+            # он сам подтянется, когда trailing-логика ниже решит двигать SL.
+            exit_plan['breakeven_activated'] = True
+            exit_plan['breakeven_at'] = datetime.utcnow().isoformat()
+            exit_plan['breakeven_pnl_pct'] = round(pnl_pct, 4)
+            exit_plan['breakeven_old_sl'] = old_sl
+            exit_plan['breakeven_new_sl'] = new_sl
+            db_pos.exit_plan_json = exit_plan
+            sess.flush()
+
+            self.log('info',
+                     f'BREAKEVEN STOP {symbol} {side}: SL ${old_sl} → ${new_sl} '
+                     f'(pnl={pnl_pct:.2f}%, entry=${entry_price})')
+
+            return {
+                'applied': True,
+                'symbol': symbol,
+                'old_sl': old_sl,
+                'new_sl': new_sl,
+                'pnl_pct': round(pnl_pct, 4),
+            }
+
     def _execute_pending_buys(self) -> Dict:
         """Execute pending BUY signals from strategy_signals"""
         executed = 0
@@ -1671,13 +1905,87 @@ class ExecutionAgent(BaseAgent):
                         self.log('warning', f"set_leverage({sym},{self.leverage}x): {le}")
                 self.log('info', f"BUY {symbol}: qty={qty} notional=${qty*price:.2f} lev={self.leverage}x")
                 order = ccxt_bybit.create_order(sym, 'market', 'buy', qty)
+                # FIX 06.07.2026: order.get(...) with default arg does NOT fire when key
+                # exists with None value. Bybit ccxt market-order response often has
+                # 'filled'=None at first call. Use explicit None check (same pattern
+                # applied to _bybit_market_buy_ccxt above).
+                filled = order.get('filled')
+                avg = order.get('average')
                 result = {
                     'retCode': 0,
                     'orderId': order.get('id'),
-                    'executed_qty': float(order.get('filled', qty)),
-                    'avgPrice': float(order.get('average', price)),
+                    'executed_qty': float(filled) if filled is not None else float(qty),
+                    'avgPrice': float(avg) if avg is not None else float(price),
                 }
                 result['cummulative_quote_qty'] = result['executed_qty'] * result['avgPrice']
+
+                # ══════════════════════════════════════════════════════════════════
+                # FIX 07.07.2026 — выставляем SL/TP на Bybit сразу после open.
+                # ──────────────────────────────────────────────────────────────────
+                # До этого фикса ветка bybit в execute_linear_buy просто игнорировала
+                # sl_pct/tp_pct/stop_loss_price/take_profit_price: ccxt create_order
+                # для Bybit v5 НЕ принимает SL/TP в params (отдельный endpoint
+                # /v5/position/trading-stop). Результат: позиции открывались БЕЗ
+                # защиты на стороне биржи → monitor-loop был единственной защитой,
+                # при пропуске тика позиция жила "голая".
+                #
+                # Per Boss (07.07.2026): "включи индивидуальный TP и TS".
+                #   • TP — выставляем здесь на Bybit (фиксирует прибыль биржей).
+                #   • TS — программный trailing (уже реализован в monitor-loop,
+                #     строки 1353+); активируется на +0.20% прибыли, дистанция 0.10%.
+                #
+                # H4: приоритет абсолютным stop_loss_price/take_profit_price из сигнала.
+                # ══════════════════════════════════════════════════════════════════
+                entry_price = result['avgPrice']
+                # R23 (08.07.2026): sl_pct/tp_pct здесь интерпретируются как TARGET NET
+                # (доля от entry после вычета fee). Поэтому gross = target + fee_buffer.
+                if stop_loss_price:
+                    sl_abs = float(stop_loss_price)
+                elif sl_pct is not None:
+                    # Gross SL = (target_net_sl + fee_buffer). Hit loss = target_net, fee съедает buffer.
+                    sl_gross_pct = sl_pct + self.fee_buffer_pct
+                    sl_abs = round(entry_price * (1 - sl_gross_pct / 100), 4)
+                else:
+                    sl_gross_pct = self.default_sl_pct + self.fee_buffer_pct
+                    sl_abs = round(entry_price * (1 - sl_gross_pct / 100), 4)
+
+                if take_profit_price:
+                    tp_abs = float(take_profit_price)
+                elif tp_pct is not None:
+                    # Gross TP = (target_net_tp + fee_buffer). Hit profit = target_net.
+                    tp_gross_pct = tp_pct + self.fee_buffer_pct
+                    tp_abs = round(entry_price * (1 + tp_gross_pct / 100), 4)
+                elif not take_profit_price:
+                    # TP не передан в сигнале → выставляем default_tp_pct + fee_buffer
+                    tp_gross_pct = self.default_tp_pct + self.fee_buffer_pct
+                    tp_abs = round(entry_price * (1 + tp_gross_pct / 100), 4)
+                else:
+                    tp_abs = None
+
+                # Bybit V5 требует SL строго ниже lastPrice (long). Если entry ниже
+                # текущей цены (проскальзывание вверх) — двигаем SL на lastPrice*0.999.
+                last = float(ccxt_bybit.fetch_ticker(sym).get('last') or entry_price)
+                if sl_abs >= last:
+                    sl_abs = round(last * 0.999, 4)
+                if tp_abs is not None and tp_abs <= last:
+                    tp_abs = round(last * 1.001, 4)
+
+                # Idempotency guard: только если есть что менять — отправляем.
+                if sl_abs or tp_abs:
+                    sl_tp_resp = self._bybit_set_sl_tp(
+                        symbol,
+                        sl_price=str(sl_abs) if sl_abs else None,
+                        tp_price=str(tp_abs) if tp_abs else None,
+                    )
+                    if sl_tp_resp.get('retCode') == 0:
+                        self.log('info',
+                                 f"SL/TP set BUY {symbol}: SL=${sl_abs} TP=${tp_abs}")
+                    else:
+                        self.log('warning',
+                                 f"SL/TP set failed BUY {symbol}: "
+                                 f"{sl_tp_resp.get('retCode')} {sl_tp_resp.get('retMsg','')}")
+                result['sl_price'] = sl_abs
+                result['tp_price'] = tp_abs
                 return result
             current_price = float(ticker.get('lastPrice', 0))
             if current_price <= 0:
@@ -1706,13 +2014,16 @@ class ExecutionAgent(BaseAgent):
             if qty <= 0:
                 return {'error': f'Qty {qty:.4f} below min {step}'}
 
-            # Step 2b: SL price (H4: приоритет абсолютному stop_loss_price из сигнала)
+            # Step 2b: SL price (H4: приоритет абсолютному stop_loss_price из сигнала).
+            # R23 (08.07.2026): fee-aware — gross = target_net + fee_buffer.
             if stop_loss_price:
                 stop_loss = str(stop_loss_price)
             elif sl_pct is not None:
-                stop_loss = str(round(current_price * (1 - sl_pct / 100), 4))
+                sl_gross_pct = sl_pct + self.fee_buffer_pct
+                stop_loss = str(round(current_price * (1 - sl_gross_pct / 100), 4))
             else:
-                stop_loss = str(round(current_price * (1 - self.default_sl_pct / 100), 4))
+                sl_gross_pct = self.default_sl_pct + self.fee_buffer_pct
+                stop_loss = str(round(current_price * (1 - sl_gross_pct / 100), 4))
 
             # H4: take_profit_price из сигнала → ставим на Bybit (если передан)
             take_profit_arg = str(take_profit_price) if take_profit_price else None
@@ -1804,13 +2115,16 @@ class ExecutionAgent(BaseAgent):
             if qty <= 0:
                 return {'error': f'Qty {qty:.4f} below min {step}'}
 
-            # H4: SL price (приоритет абсолютному stop_loss_price из сигнала)
+            # H4: SL price (приоритет абсолютному stop_loss_price из сигнала).
+            # R23: fee-aware.
             if stop_loss_price:
                 stop_loss = str(stop_loss_price)
             elif sl_pct is not None:
-                stop_loss = str(round(current_price * (1 + sl_pct / 100), 4))
+                sl_gross_pct = sl_pct + self.fee_buffer_pct
+                stop_loss = str(round(current_price * (1 + sl_gross_pct / 100), 4))
             else:
-                stop_loss = str(round(current_price * (1 + self.default_sl_pct / 100), 4))
+                sl_gross_pct = self.default_sl_pct + self.fee_buffer_pct
+                stop_loss = str(round(current_price * (1 + sl_gross_pct / 100), 4))
 
             # H4: take_profit_price из сигнала → ставим на Bybit (если передан)
             take_profit_arg = str(take_profit_price) if take_profit_price else None

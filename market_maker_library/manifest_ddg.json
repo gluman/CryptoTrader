@@ -1,0 +1,74 @@
+[
+  {
+    "id": "douglas_zone",
+    "status": "FAILED"
+  },
+  {
+    "id": "douglas_disciplined",
+    "status": "FAILED"
+  },
+  {
+    "id": "elder_living",
+    "status": "FAILED"
+  },
+  {
+    "id": "elder_room",
+    "status": "FAILED"
+  },
+  {
+    "id": "dalton_mind",
+    "status": "FAILED"
+  },
+  {
+    "id": "harris_exchanges",
+    "status": "FAILED"
+  },
+  {
+    "id": "chan_algo",
+    "status": "FAILED"
+  },
+  {
+    "id": "chan_quant",
+    "status": "FAILED"
+  },
+  {
+    "id": "lopez_afml",
+    "status": "FAILED"
+  },
+  {
+    "id": "brooks_trends",
+    "status": "FAILED"
+  },
+  {
+    "id": "brooks_reversals",
+    "status": "FAILED"
+  },
+  {
+    "id": "murphy_ta",
+    "status": "FAILED"
+  },
+  {
+    "id": "antonopoulos_bitcoin",
+    "status": "FAILED"
+  },
+  {
+    "id": "ammous_standard",
+    "status": "FAILED"
+  },
+  {
+    "id": "lewis_flash",
+    "status": "FAILED"
+  },
+  {
+    "id": "weis_trades",
+    "status": "FAILED"
+  },
+  {
+    "id": "weis_wyckoff2",
+    "status": "FAILED"
+  },
+  {
+    "id": "twomey_box",
+    "status": "FAILED"
+  }
+]
