@@ -118,7 +118,9 @@ class Clone5V7Strategy(Clone5V6Strategy):
                   "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
                   "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
                   "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT"],
-        min_confidence=0.50,
+        # [Fix 22.07.2026 Босс] min_confidence 0.50→0.60 — анализ порогов на 30д × 19 пар:
+        # conf=0.60 даёт PF=1.27 vs 1.14 (PnL +14.65% vs +8.30%), отсекает слабые LLM-сигналы.
+        min_confidence=0.60,
         # R16: baseline 5m params. Grid search на полном окне 148д уточнит.
         # R22 (08.07.2026, Босс): SL/TP расширены для fee-survival на $15 notional.
         #   • Было 0.5/2.0% → fee round-trip ~0.10% всё равно ест gross в большинстве сделок.

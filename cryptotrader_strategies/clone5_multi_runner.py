@@ -162,7 +162,9 @@ STRATEGIES = [
                     "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
                     "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
                     "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT"],
-        "min_conf": 0.50,
+        # [Fix 22.07.2026 Босс] min_conf 0.50→0.60 — синхронизировано с clone_5_v7.py params.
+        # Оптимальная комбинация из анализа 30д × 19 пар (см. /tmp/threshold_analysis.py).
+        "min_conf": 0.60,
     },
 ]
 

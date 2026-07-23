@@ -45,7 +45,32 @@ from .base_strategy import (
 # TON не торгуется (нет в списке 8 пар), но override был legacy.
 # Пустой dict → _apply_per_pair_params() no-op → дефолты StrategyParams.
 # Бэкап с per-pair значениями: clone_5_v6.py.bak.relax.20260619_150944
+#
+# R24 (22.07.2026, Босс): per-pair вернулся. Загружается из config/per_pair_params.json
+# если файл существует. Обновляется еженедельно через cron (Monday 03:00 MSK).
+import json
+import os
+from pathlib import Path
+
+_PER_PAIR_JSON = Path(__file__).resolve().parent.parent / "config" / "per_pair_params.json"
+
 PER_PAIR_PARAMS = {}
+PER_PAIR_META = {}
+
+if _PER_PAIR_JSON.exists():
+    try:
+        with open(_PER_PAIR_JSON, "r") as f:
+            cfg = json.load(f)
+        PER_PAIR_PARAMS = cfg.get("per_pair", {})
+        PER_PAIR_META = {k: {k2: v2 for k2, v2 in v.items() if k2.startswith("_")}
+                          for k, v in PER_PAIR_PARAMS.items()}
+        # Strip metadata from params
+        PER_PAIR_PARAMS = {k: {k2: v2 for k2, v2 in v.items() if not k2.startswith("_")}
+                            for k, v in PER_PAIR_PARAMS.items()}
+        print(f"[clone_5_v6] Per-pair params loaded: {len(PER_PAIR_PARAMS)} pairs from {_PER_PAIR_JSON}")
+    except Exception as e:
+        print(f"[clone_5_v6] WARNING: Failed to load per_pair_params.json: {e}, using empty dict")
+        PER_PAIR_PARAMS = {}
 
 
 class Clone5V6Strategy(BaseStrategy):
@@ -69,11 +94,17 @@ class Clone5V6Strategy(BaseStrategy):
     # LLM M3-гейт (R18 Mode C) компенсирует возросший риск ложных входов: он получает
     # больше кандидатов и отсекает слабые через Composite MM master-prompt.
     # Бэкап: clone_5_v6.py.bak.relax.20260619_150944
+    # [Fix 22.07.2026 Босс] Оптимальные пороги после анализа 30д × 19 пар:
+    #   sweep_threshold  0.0015 → 0.0005 (берём даже мелкие sweeps, +147 trades)
+    #   wick_body_min    0.6 → 0.4 (не требуем сильный wick, +12% PF)
+    #   min_volume_spike 1.0 → 0.5 (берём при объёме от 0.5× avg, PF 1.23)
+    #   min_rr_ratio     2.5 → 2.0 (больше trades с приемлемым RR, PF 1.23)
+    # Комбинация: PF 1.14→1.35, PnL +8.30%→+22.85% за 30д.
     swing_lookback: int = 50
-    sweep_threshold: float = 0.0015  # R19: 0.003 → 0.0015 (sweep-downswing ≥0.15%)
-    wick_body_min_ratio: float = 0.6  # R19: 1.0 → 0.6 (фитиль ≥0.6×тела)
-    min_volume_spike: float = 1.0     # R19: 1.3 → 1.0 (объём ≥1.0× среднего)
-    min_rr_ratio: float = 2.5
+    sweep_threshold: float = 0.0005  # было 0.0015 (R19)
+    wick_body_min_ratio: float = 0.4  # было 0.6 (R19)
+    min_volume_spike: float = 0.5     # было 1.0 (R19)
+    min_rr_ratio: float = 2.0         # было 2.5
 
     # === ICT session: London+NY 8-20 UTC ===
     session_start_utc: int = 8
@@ -109,7 +140,7 @@ class Clone5V6Strategy(BaseStrategy):
     bulkowski_spring_bonus: float = 0.20  # strong spring pattern
     bulkowski_utad_bonus: float = 0.20
     near_round_bonus: float = 0.05
-    min_score_to_trade: float = 0.55  # higher than v2 (0.50) → fewer, better trades
+    min_score_to_trade: float = 0.60  # [Fix 22.07.2026 Босс] 0.55→0.60: PF 1.27 vs 1.14, PnL +14.65% vs +8.30%
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # GAP FILTERS (R18, 18.06.2026) — из mm_strategy_rules.json (D3/E2/B4/N5)
@@ -193,16 +224,21 @@ class Clone5V6Strategy(BaseStrategy):
         Возвращает (alignment, penalty).
         alignment: "with" | "against" | "neutral"
         penalty > 0 если против тренда (вычитается из score).
+
+        R25 (22.07.2026, Босс): жёсткий trend filter.
+        Анализ 19 пар: 99.2% убыточных сделок = counter-trend (1h).
+        With-trend WR=87.5%, PnL=+4.45%. Counter-trend WR=44.2%, PnL=-79.80%.
+        Блокируем counter-trend через большой штраф → score < min_score_to_trade.
+        Unknown trend = пропускаем (для новых пар).
         """
         trend = self._get_trend_for(symbol)
-        if trend == "unknown":
-            return "neutral", 0.0
-        is_long = (side == "LONG")
-        if (is_long and trend == "up") or (not is_long and trend == "down"):
+        if trend in ("up", "down"):
+            is_long = (side == "LONG")
+            if (is_long and trend == "down") or (not is_long and trend == "up"):
+                # R25: counter-trend penalty увеличен с 0.10 до 1.0 → score падает ниже 0.60 → сигнал отклонён
+                return "against", 1.0
             return "with", 0.0
-        if (is_long and trend == "down") or (not is_long and trend == "up"):
-            return "against", self.counter_trend_penalty
-        return "neutral", 0.0  # flat
+        return "neutral", 0.0
 
     def _market_condition_bonus(self, side: str, symbol: str) -> float:
         """B4 Market condition: springs надёжнее в bear, UTADs в bull."""
