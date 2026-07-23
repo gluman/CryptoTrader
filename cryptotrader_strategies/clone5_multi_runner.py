@@ -579,8 +579,25 @@ def _scan_llm_primary(cfg: dict, strategy, regime: str, bb_w: float) -> int:
             except Exception as e:
                 errors[sym] = str(e)
     llm_elapsed = (datetime.now() - llm_start).total_seconds()
-    print(f"  ⏱ LLM batch done in {llm_elapsed:.1f}s "
-          f"({len(results)} ok, {len(errors)} errors)", flush=True)
+    # ═══ FIX 23.07.2026 (Босс): корректный подсчёт успехов LLM ═══
+    # llm_primary_decision НЕ бросает исключение на HTTP 429 / parse-fail — она
+    # возвращает dict с полем error='llm_call_failed' (Mode D safe-hold). Раньше
+    # такие попадали в results и считались "ok" → лог "19 ok, 0 errors" маскировал
+    # тотальный провал (напр. M3 429 token-limit). Теперь ok = только dict без error.
+    ok = 0
+    failed_reasons: list = []
+    for r in results.values():
+        if isinstance(r, dict) and not r.get("error"):
+            ok += 1
+        else:
+            failed_reasons.append(r.get("error", "bad_result") if isinstance(r, dict) else "none_result")
+    line = (f"  ⏱ LLM batch done in {llm_elapsed:.1f}s "
+            f"({ok} ok, {len(failed_reasons)} failed, {len(errors)} errors)")
+    if failed_reasons:
+        from collections import Counter
+        reason, cnt = Counter(failed_reasons).most_common(1)[0]
+        line += f" — {cnt}× {reason}"
+    print(line, flush=True)
 
     # --- Phase 3: логировать ВСЕ решения, открыть confirmed ---
     df_by_sym = {sym: df for sym, df, _ in pairs_data}
