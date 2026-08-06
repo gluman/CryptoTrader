@@ -46,3 +46,9 @@ Thumbs.db
 *.ex4logs/
 .env.bak*
 logs/*.log.*
+
+# Бэкапы, создаваемые скриптами и правками (06.08.2026)
+*.bak
+*.bak.*
+reports/
+config/per_pair_params_backups/
