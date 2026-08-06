@@ -271,7 +271,11 @@ agents:
     sl_atr_multiplier: 1.0             # k_sl — 1× ATR is industry-standard
     tp_atr_multiplier: 1.7             # k_tp — 1.7× ATR gives ~1.7 R/R
     risk_reward_ratio: 1.67
-    trailing_stop_enabled: true
+    # [04.08.2026 Claude] Отключено под стратегию v9 CTL: в её проверке trailing
+    # не участвовал, а замер на 90д показал, что он срезает эдж почти вдвое
+    # (+0.296% → +0.116%/сделку). TP у v9 стоит на 2.0–5.0%, а trailing с
+    # дистанцией 0.50% выбивает позицию задолго до цели.
+    trailing_stop_enabled: false
     # R23: trailing теперь fee-aware. Distance 0.50% покрывает fee (0.11%)
     # + 4× typical 5m noise (0.10%) = 0.51%. Activation 1.0% — даём цене реально выйти
     # за пределы noise-floor перед тем как trailing "запоминает" SL.
@@ -281,12 +285,24 @@ agents:
     # BE-стоп (Босс 04.07.2026): когда pnl >= activation → SL переносится в entry±offset.
     # R23: offset 0.15% покрывает fee round-trip 0.11% + safety margin. Было 0.03%
     # (комментарий говорил "for taker fee" но фактически покрывал только 1/4 fee).
-    breakeven_enabled: true
+    # [04.08.2026 Claude] Отключено под v9 CTL — самый вредный из механизмов выхода.
+    # Замер на 90д: с BE winrate растёт 58% → 82%, но матожидание падает
+    # +0.296% → +0.013%/сделку. Он переводит в безубыток сделки, которые дошли бы
+    # до TP, а убыточные не спасает — классическая асимметрия против нас.
+    # Вместе с trailing съедали 93% эджа стратегии.
+    breakeven_enabled: false
     breakeven_activation_percent: 0.50   # 0.50% profit прежде чем SL → BE (было 0.20)
     breakeven_offset_percent: 0.15       # +0.15% поверх entry для fee-survival
     max_positions_per_symbol: 1
     max_open_positions_total: 3   # 2026-05-27 LIVE: up to 3 (one per symbol XRP/DOGE/TON), $5×3=$15 max exposure
-    daily_max_loss_usd: 1.5
+    # [04.08.2026 Босс] 15% депозита ($22.56) = $3.38. Роль — предохранитель от
+    # аномального дня, а не ограничитель обычной торговли: за 90д худший день при
+    # x1 был −0.75$, так что порог не срабатывает в рядовой ситуации. Замер показал,
+    # что срабатывание дневного стопа всегда УХУДШАЕТ итог (у стратегии
+    # положительное матожидание, а стоп лишает шанса отыграться до конца дня):
+    # при x2 стоп −1.5$ стоил −0.87$ за 90д, при x3 — −1.26$.
+    # При переходе на плечо пересчитать: x2 → −3.00$, x3 → −4.50$.
+    daily_max_loss_usd: 3.38
     sl_cooldown_seconds: 180
   executor:
     enabled: true    # 2026-05-27 LIVE (minimal $5/1x on XRP/DOGE/TON)
