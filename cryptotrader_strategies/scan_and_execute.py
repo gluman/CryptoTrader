@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scan_and_execute.py — единый scan→execute цикл для v7a стратегии.
+# scan_and_execute.py — единый scan→execute цикл для v8a стратегии.
 
 ═══════════════════════════════════════════════════════════════════════════════
 ЗАЧЕМ ЭТОТ ФАЙЛ СУЩЕСТВЕТ
@@ -80,7 +80,7 @@ scan_and_execute.py — единый scan→execute цикл для v7a стра
 
   • cryptotrader_strategies/clone5_multi_runner.py — Phase 1 (scan)
   • cryptotrader_strategies/execute_cron.py — Phase 2 (execute)
-  • cryptotrader_strategies/clone_5_v7.py — v7a strategy logic
+  • cryptotrader_strategies/clone_5_v8.py — v8a strategy logic (V7 + CHOCH + Score bonus)
   • src/agents/execution_agent.py — ExecutionAgent.run_once()
   • skill: trading/bybit-trading-orchestration — Pattern 10 (cache-first)
   • skill: cron-no-agent-script-pattern — P2b verify-the-tick rule

@@ -127,11 +127,8 @@ import pandas as pd
 sys.path.insert(0, '/home/andy/CryptoTrader')
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
-
-from cryptotrader_strategies.clone_5_v7 import Clone5V7Strategy
-
-# R13 FIX: единый источник DSN — db_safe.db_dsn() (убран дубль хардкода .149).
-# Если POSTGRES_PASSWORD не задан — connection упадёт с понятной ошибкой psycopg2.
+from cryptotrader_strategies.clone_5_v8 import Clone5V8Strategy
+from cryptotrader_strategies.clone_5_v9 import Clone5V9Strategy
 from cryptotrader_strategies.db_safe import db_dsn
 DB = db_dsn()
 # R16 (17.06): откат 15m → 5m. Сравнение показало PF 1.89 (5m) vs 1.02 (15m).
@@ -146,9 +143,17 @@ MAX_CONCURRENT = 2
 # добавить dict ниже + вернуть импорты Clone5V6Strategy/Clone5V2Strategy.
 STRATEGIES = [
     {
-        "name": "clone5_v7_trailing_only",
-        "display": "v7a",
-        "class": Clone5V7Strategy,
+        # [04.08.2026 Босс] Переключено v8a → v9 CTL (counter-trend long).
+        # Причина: у v8a детектор CHOCH никогда не подтверждается (ищет подтверждение
+        # в барах sweep_idx+2..+10, т.е. в будущем — на живом вызове это пустой range),
+        # поэтому механика молчала, а решения принимала LLM с gross-эджем +0.038%/сделку
+        # при комиссии 0.11%. v9 — единственная конфигурация, прошедшая проверку вне
+        # выборки: +0.144%/сделку на holdout, +0.097% на 25 посторонних парах.
+        # llm_mode=off — механика решает сама (как и проверялось).
+        "name": "clone5_v9_ctl",
+        "display": "v9-CTL",
+        "class": Clone5V9Strategy,
+        "llm_mode": "off",
         # [Fix 2026-06-17] TONUSDT убран — Bybit closed контракт (status=Closed,
         # delivery 12.06.2026). OHLCV stale навсегда, позиция неисполнима.
         # [Fix 17.07.2026 Босс] WLDUSDT, XRPUSDT убраны — WR 16.7% и 0% за 06-12.07,
@@ -157,11 +162,20 @@ STRATEGIES = [
         # profit factor > 1.5 на 30d бэктесте, BB%>1.5, left-skew (наш setup).
         # [Fix 19.07.2026 Босс] добавлены BCH/DYDX/AXS/MAGIC/KSM —
         # топ-5 расширенного скрининга 60+ пар (PF > 2.5).
+        # [Fix 03.08.2026 Claude] Список восстановлен после порчи weekly_optimization.py
+        # (02.08 03:42 переписал строку наивным regex → SyntaxError, скан лежал 390 циклов;
+        # имена были с двойным суффиксом «USUSDTUSDT»). Восстановлен состав из git HEAD
+        # (19 пар) + добавления V39/V46 от 30.07 (8 пар). Все 27 проверены на Bybit —
+        # активные linear USDT perpetual.
         "symbols": ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
                     "DOGEUSDT", "ADAUSDT",
                     "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
                     "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
-                    "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT"],
+                    "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT",
+                    # [30.07.2026] Добавлены 4 новые пары из скрининга V39
+                    "SPCXUSDT", "BEATUSDT", "KAITOUSDT", "UAIUSDT",
+                    # [30.07.2026] Добавлены 4 пары из Binance скрининга V46
+                    "EULUSDT", "REUSDT", "GIGGLEUSDT", "ETHUSDT"],
         # [Fix 22.07.2026 Босс] min_conf 0.50→0.60 — синхронизировано с clone_5_v7.py params.
         # Оптимальная комбинация из анализа 30д × 19 пар (см. /tmp/threshold_analysis.py).
         "min_conf": 0.60,
@@ -236,19 +250,28 @@ def get_ohlcv(symbol: str, lookback_bars: int = 300) -> pd.DataFrame:
 
 
 def has_open_position(symbol: str, strategy_name: str = None) -> bool:
-    """Check open position. If strategy_name given, check only this strategy's positions."""
+    """Check open position. If strategy_name given, check only this strategy's positions.
+
+    [Fix 05.08.2026 Claude] Было `status='open'` строчными, а execution_agent пишет
+    и читает `status='OPEN'` (см. execution_agent.py:449,626,1031). PostgreSQL
+    регистрозависим при сравнении строк → эта проверка ВСЕГДА возвращала False.
+    Последствие вживую: 05.08 AKEUSDT открылась дважды (17:01 и 17:43) и позиция
+    удвоилась до $13.9 вместо $7 — при стопе это дало −0.203$ вместо −0.10$.
+    Тем же дефектом был сломан и count_open_positions() ниже. Сравнение сделано
+    регистронезависимым, чтобы не зависеть от того, как пишет вызывающая сторона.
+    """
     conn = get_db()
     try:
         cur = conn.cursor()
         if strategy_name:
             cur.execute("""
                 SELECT COUNT(*) FROM positions
-                WHERE symbol=%s AND status='open' AND notes LIKE %s
+                WHERE symbol=%s AND upper(status)='OPEN' AND notes LIKE %s
             """, (symbol, f'%{strategy_name}%'))
         else:
             cur.execute("""
                 SELECT COUNT(*) FROM positions
-                WHERE symbol=%s AND status='open'
+                WHERE symbol=%s AND upper(status)='OPEN'
             """, (symbol,))
         return cur.fetchone()[0] > 0
     finally:
@@ -257,7 +280,7 @@ def has_open_position(symbol: str, strategy_name: str = None) -> bool:
 
 def open_signal(strategy_name: str, symbol: str, side: str, sl_pct: float, tp_pct: float,
                 score: float, reasoning: str, details: dict,
-                entry_price: float = 0.0) -> int:
+                entry_price: float = 0.0, max_hold_min: int = 0) -> int:
     """Create strategy_signals row (ExecutionAgent picks up).
 
     Сторона записывается в `action` ('BUY' = LONG, 'SELL' = SHORT).
@@ -299,6 +322,12 @@ def open_signal(strategy_name: str, symbol: str, side: str, sl_pct: float, tp_pc
             "vol_bb_width": details.get("vol_bb_width", 0.0),
             "trailing_on": details.get("vol_regime") == "high",  # R17: trailing on iff regime=high
         }
+        # [Fix 04.08.2026 Claude] max_hold теперь реально доезжает до исполнителя.
+        # Было: ключ не клался в exit_plan → execution_agent ставил max_hold_until=None
+        # → позиции жили по 143-217 мин при заявленных 15. Подбирать max_hold было
+        # бессмысленно, пока этого ключа нет. 0 = без ограничения (прежнее поведение).
+        if max_hold_min and max_hold_min > 0:
+            exit_plan["max_hold_minutes"] = int(max_hold_min)
         reasoning_text = json.dumps({
             "details": details,
             "reasoning": reasoning,
@@ -332,7 +361,9 @@ def count_open_positions() -> int:
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM positions WHERE status='open'")
+        # [Fix 05.08.2026 Claude] см. has_open_position: было 'open', в БД — 'OPEN',
+        # из-за чего глобальный лимит MAX_CONCURRENT не работал (счётчик всегда 0).
+        cur.execute("SELECT COUNT(*) FROM positions WHERE upper(status)='OPEN'")
         return cur.fetchone()[0]
     finally:
         conn.close()
@@ -700,9 +731,18 @@ def scan_strategy(cfg: dict) -> int:
     # Но только при vol_regime=high (≈1000 calls/day; в low-vol LLM всё равно HOLD).
     # - vol_regime=high → Mode D (_scan_llm_primary): LLM решает по всем парам.
     # - vol_regime=low  → Mode C (текущая логика ниже): v7a детектор + LLM gate.
-    if regime == "high":
+    # [04.08.2026 Claude] llm_mode="off" — механический вход решает сам.
+    # Зачем: v9 CTL проверен вне выборки именно как чистая механика (+0.144%/сделку
+    # на holdout, +0.097% на посторонних парах). LLM-слой форвардного эджа не показал
+    # (gross +0.038%/сделку на 564 реальных решениях, меньше комиссии 0.11%), поэтому
+    # его участие только зашумило бы проверку гипотезы живыми деньгами.
+    llm_mode = cfg.get("llm_mode", "primary")
+
+    if regime == "high" and llm_mode == "primary":
         print(f"  🧠 R20 Mode D: LLM primary (vol_regime=high)", flush=True)
         return _scan_llm_primary(cfg, strategy, regime, bb_w)
+    if llm_mode == "off":
+        print(f"  ⚙ Mode M: механика решает сама, LLM не участвует", flush=True)
 
     # ═══ R18: LLM HYBRID gate (Mode C) — fallback для low-vol ═══
     # M3 LLM загружается lazily — импорт только если будет non-HOLD candidate.
@@ -750,28 +790,29 @@ def scan_strategy(cfg: dict) -> int:
         # ~30 calls/day × 2188 tokens = 65K tokens/day.
         # Graceful fallback: если LLM недоступен — пропускаем signal (v7a trusted).
         llm_result = None
-        try:
-            if llm_gate is None:
-                from cryptotrader_strategies.mm_llm_gate import llm_confirm_signal
-                llm_gate = llm_confirm_signal
-            llm_result = llm_gate(sym, TF, decision)
-            if not llm_result["confirmed"]:
-                print(f"  ✗ {sym}: LLM REJECTED v7a {sig} "
-                      f"(llm={llm_result['llm_signal']}/{llm_result['llm_confidence']:.2f} "
-                      f"co={llm_result['co_action']})",
-                      flush=True)
-                print(f"      reasoning: {llm_result['llm_reasoning']}",
-                      flush=True)
-                continue
-            if llm_result.get("error") is None:
-                print(f"  ✓ {sym}: LLM CONFIRMED {sig} "
-                      f"(llm_conf={llm_result['llm_confidence']:.2f} "
-                      f"co={llm_result['co_action']} agree={llm_result['agree']})",
-                      flush=True)
-                print(f"      reasoning: {llm_result['llm_reasoning']}",
-                      flush=True)
-        except Exception as e:
-            print(f"  ⚠ {sym}: LLM gate error (graceful pass-through): {e}", flush=True)
+        if llm_mode != "off":
+            try:
+                if llm_gate is None:
+                    from cryptotrader_strategies.mm_llm_gate import llm_confirm_signal
+                    llm_gate = llm_confirm_signal
+                llm_result = llm_gate(sym, TF, decision)
+                if not llm_result["confirmed"]:
+                    print(f"  ✗ {sym}: LLM REJECTED v7a {sig} "
+                          f"(llm={llm_result['llm_signal']}/{llm_result['llm_confidence']:.2f} "
+                          f"co={llm_result['co_action']})",
+                          flush=True)
+                    print(f"      reasoning: {llm_result['llm_reasoning']}",
+                          flush=True)
+                    continue
+                if llm_result.get("error") is None:
+                    print(f"  ✓ {sym}: LLM CONFIRMED {sig} "
+                          f"(llm_conf={llm_result['llm_confidence']:.2f} "
+                          f"co={llm_result['co_action']} agree={llm_result['agree']})",
+                          flush=True)
+                    print(f"      reasoning: {llm_result['llm_reasoning']}",
+                          flush=True)
+            except Exception as e:
+                print(f"  ⚠ {sym}: LLM gate error (graceful pass-through): {e}", flush=True)
 
         side = decision.get('side')
         if side is None:
@@ -790,10 +831,12 @@ def scan_strategy(cfg: dict) -> int:
             details['llm_reasoning'] = llm_result.get('llm_reasoning', '')
         # R14: entry_price = close последнего закрытого бара из БД (без API-вызова)
         entry_price = float(df.iloc[-1]['close'])
+        # [04.08.2026] max_hold из решения стратегии (v9 отдаёт персональный по паре)
         sig_id = open_signal(
             cfg["name"], sym, side, sl_pct, tp_pct, score,
             decision.get('reasoning', ''), details,
             entry_price=entry_price,
+            max_hold_min=int(decision.get('max_hold_minutes', 0) or 0),
         )
         if sig_id > 0:
             signals += 1
