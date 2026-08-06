@@ -136,7 +136,25 @@ TF = "5m"
 TIMEFRAME_MIN = 5
 # R3 FIX: единый лимит одновременных позиций (было 1/2/3/8 в разных местах).
 # Теперь один источник истины, enforced в продьюсере.
-MAX_CONCURRENT = 2
+#
+# [06.08.2026 Босс] Лимит стал динамическим: compound_engine пересчитывает его от
+# свободного баланса и кладёт в compound_state.json (сначала растёт ЧИСЛО позиций,
+# и только после потолка — размер сделки). Здесь было жёстко 2, при том что
+# settings.yaml говорил 3 — расхождение молча резало сигналы.
+def get_max_concurrent() -> int:
+    """Лимит одновременных позиций из compound_state.json (fallback 3)."""
+    for p in (Path(__file__).resolve().parent.parent / 'compound_state.json',
+              Path('/home/andy/CryptoTrader_main/compound_state.json')):
+        try:
+            n = int(json.loads(p.read_text()).get('current_max_positions') or 0)
+            if n > 0:
+                return n
+        except Exception:
+            continue
+    return 3
+
+
+MAX_CONCURRENT = get_max_concurrent()
 
 # Per-strategy config.
 # 08.06.2026: v6/v2 отключены по приказу Босса. Если потребуется re-enable —
