@@ -128,7 +128,15 @@ def select_bybit_key() -> Tuple[Optional[str], Optional[str]]:
             _cache = (time.time(), key, secret)
             return key, secret
         else:
-            log.warning(f"bybit_key_selector: {label} key ({key[:8]}...) failed: {reason}")
+            # [06.08.2026] ip_mismatch на первом ключе — штатное поведение dual-key
+            # схемы: VPN_OFF ключ заведомо не проходит, рабочий VPN_ON идёт следом.
+            # Как WARNING эта строка попадала в каждый Telegram-отчёт и в каждый лог
+            # скана по 8 раз. Ожидаемый случай понижен до debug, остальные причины
+            # (revoked, wrong secret, rate limit) остаются WARNING — их видеть надо.
+            if reason == "ip_mismatch":
+                log.debug(f"bybit_key_selector: {label} key ({key[:8]}...) failed: {reason}")
+            else:
+                log.warning(f"bybit_key_selector: {label} key ({key[:8]}...) failed: {reason}")
 
     log.error("bybit_key_selector: ALL keys failed — execution disabled")
     return None, None

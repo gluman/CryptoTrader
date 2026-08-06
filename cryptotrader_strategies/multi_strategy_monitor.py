@@ -272,8 +272,11 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
             lines.append(f"      • Perp uPnL:         {sign}${upl:.4f}  (не входит в locked)")
     if state["compound"]:
         c = state["compound"]
-        lines.append(f"   Tier: {c.get('tier','?')}  Pos: ${c.get('current_pos_usdt', 0):.2f}  "
-                     f"last_update: {c.get('last_update', '?')[:16]}")
+        # [06.08.2026] Было "Tier: starter" — тиров больше нет, схема задаётся
+        # парой (число позиций × размер), её и показываем.
+        lines.append(f"   Схема: {c.get('current_max_positions', '?')} × "
+                     f"${c.get('current_pos_usdt', 0):.2f}  "
+                     f"({c.get('last_update', '?')[:16]})")
     lines.append("")
 
     # 2. Open positions
@@ -289,14 +292,14 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
         lines.append("📌 **Open positions**: 0")
     lines.append("")
 
-    # 3. Signals last 1h
-    lines.append("🔔 **Signals last 1h**:")
+    # 3. Signals last 1h — пустую секцию сворачиваем в одну строку
     if state["sigs_1h"]:
+        lines.append("🔔 **Сигналы за час**:")
         for strat, cnt, last_ts in state["sigs_1h"]:
             short = strat.replace("clone5_", "").replace("_market_maker", "")
-            lines.append(f"   `{short}`: {cnt} signals  last @ {last_ts}")
+            lines.append(f"   `{short}`: {cnt} шт, последний {last_ts}")
     else:
-        lines.append("   (no signals last hour — рынок тихий)")
+        lines.append("🔔 **Сигналы за час**: нет")
     lines.append("")
 
     # 4. Closed last 24h
@@ -340,9 +343,8 @@ def format_report(state, balance_total, balance_free, breakdown=None) -> str:
                 # Show first 150 chars of reasoning
                 r_short = reasoning[:150].replace("\n", " ")
                 lines.append(f"      └ {r_short}")
-    else:
-        lines.append("")
-        lines.append("🧠 **LLM decisions (24h)**: (none — no non-HOLD candidates)")
+    # [06.08.2026] Пустую LLM-секцию не печатаем: у v9 CTL llm_mode=off, решения
+    # принимает механика, и строка "(none)" в каждом отчёте — чистый шум.
 
     return "\n".join(lines)
 
@@ -358,7 +360,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"monitor_{datetime.now(MSK).strftime('%Y%m%d_%H%M')}_msk.md"
     out_file.write_text(report)
-    print(f"\n✓ Saved: {out_file}", flush=True)
+    print(f"✓ Saved: {out_file}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

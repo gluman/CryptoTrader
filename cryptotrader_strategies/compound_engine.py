@@ -96,8 +96,16 @@ def get_tier(balance: float) -> dict:
             'max_positions': s['max_positions']}
 
 
-def get_bybit_balance():
+def get_bybit_balance(kind: str = "equity"):
     """Получить USDT баланс на Bybit (linear).
+
+    kind="equity" (по умолчанию) — total: свободные + залог под открытыми позициями.
+    kind="free" — только свободные.
+
+    [06.08.2026] Масштабирование обязано считаться от EQUITY, а не от free.
+    Иначе система душит сама себя: открыла позиции → free упал → лимит позиций
+    пересчитался вниз → новые сделки заблокированы. Проверено вживую: при 3
+    открытых позициях free упал с $22.7 до $5.6, и лимит схлопнулся до 1.
     
     R2 FIX: возвращает None при ошибке API (не 0.0 — неотличимо от пустого счёта).
     Вызывающий код обязан проверять None перед использованием.
@@ -107,8 +115,10 @@ def get_bybit_balance():
         ex = bybit_exchange(with_auth=True)
         bal = ex.fetch_balance({'type': 'swap', 'accountType': 'UNIFIED'})
         usdt_info = bal.get('USDT') or {}
-        free = usdt_info.get('free', 0.0) or 0.0
-        return float(free)
+        if kind == "free":
+            return float(usdt_info.get('free', 0.0) or 0.0)
+        total = usdt_info.get('total') or usdt_info.get('free', 0.0) or 0.0
+        return float(total)
     except Exception as e:
         print(f"ERROR fetching balance: {e}", flush=True)
         return None  # R2: None = «неизвестно», НЕ 0.0
@@ -171,7 +181,7 @@ def cmd_status():
     s = get_sizing(bal)
     state = load_state()
     print(f"=== Compound Status ===", flush=True)
-    print(f"Свободный баланс:   ${bal:.2f}", flush=True)
+    print(f"Капитал (equity):   ${bal:.2f}", flush=True)
     print(f"В работе ({CAPITAL_USE:.0%}):     ${s['usable']:.2f}", flush=True)
     print(f"Режим:              {s['phase']}", flush=True)
     print(f"Позиций:            {s['max_positions']} (потолок {MAX_POSITIONS})", flush=True)
@@ -244,7 +254,7 @@ def cmd_rebalance(force=False):
     })
     save_state(state)
     ok, msg = update_settings_max_positions(s['max_positions'])
-    print(f"✓ Пересчитано: ${bal:.2f} свободных → {cur_n} × ${cur_pos:.2f} "
+    print(f"✓ Пересчитано: ${bal:.2f} equity → {cur_n} × ${cur_pos:.2f} "
           f"стало {s['max_positions']} × ${s['pos_usdt']:.2f} "
           f"(в рынке максимум ${s['exposure']:.2f}, {s['phase']})", flush=True)
     print(f"  settings.yaml: {'✓' if ok else '✗'} {msg}", flush=True)

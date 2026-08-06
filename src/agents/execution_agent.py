@@ -1248,7 +1248,15 @@ class ExecutionAgent(BaseAgent):
                         except Exception:
                             pass
                         order_id = target.get('orderId', '') or ''
-                        pos.notes = f"orphan-sync: Bybit closed orderId={order_id[:12]}… pnl=${pnl:.4f}"
+                        # [06.08.2026] Раньше notes ПЕРЕЗАПИСЫВАЛИСЬ, стирая имя
+                        # стратегии, которое кладётся при открытии (M2 dedup).
+                        # Из-за этого вся аналитика по закрытым сделкам ломалась:
+                        # oos_live_validator ищет позиции по notes LIKE '%clone5_v9%'
+                        # и не находил НИ ОДНОЙ закрытой сделки. Имя сохраняем.
+                        _strat = (pos.notes or '').split(';')[0].strip()
+                        _prefix = f"{_strat}; " if _strat and 'orphan-sync' not in _strat else ''
+                        pos.notes = (f"{_prefix}orphan-sync: Bybit closed "
+                                     f"orderId={order_id[:12]}… pnl=${pnl:.4f}")
                         pos.updated_at = datetime.utcnow()
                         synced += 1
                         self.log('info', f"orphan-sync: {pos.symbol}#{pos.id} {(pos.side or 'LONG')} closed @ ${exit_p:.4f} pnl=${pnl:.4f}")

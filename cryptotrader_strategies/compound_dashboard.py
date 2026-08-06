@@ -88,42 +88,44 @@ def main():
     positions = get_v7_positions()
     n, wins, pnl, wr = get_v7_recent_pnl(7)
 
+    # [06.08.2026] Лимит позиций больше не константа 2 — он динамический
+    # (compound_engine масштабирует его от баланса). Раньше отчёт печатал "× 2 max"
+    # и "0/2" независимо от реальной настройки и вводил в заблуждение.
+    pos_usd = float(state.get('current_pos_usdt', 5))
+    max_pos = int(state.get('current_max_positions', 3) or 3)
+
     if args.telegram:
-        # Compact Telegram format
-        msg = (
-            f"💰 **Compound Dashboard**\n\n"
-            f"**Balance**: ${free:.2f} (total ${total:.2f})\n"
-            f"**Tier**: {state.get('tier', 'starter')}\n"
-            f"**Pos size**: ${state.get('current_pos_usdt', 5):.2f} × 2 max = ${state.get('current_pos_usdt', 5)*2:.2f}\n\n"
-            f"**Open positions**: {len(positions)}/2\n"
-        )
+        # Компактный формат: одна строка — один факт, без пустых секций
+        lines = [
+            f"💰 **Compound** `{state.get('last_update', '')[:16]}`",
+            f"Баланс: **${free:.2f}** (всего ${total:.2f})",
+            f"Схема: **{max_pos} × ${pos_usd:.2f}** = ${max_pos * pos_usd:.2f} в рынке",
+            f"Позиций: **{len(positions)}/{max_pos}**",
+        ]
         for sym, side, p, o in positions:
             p_val = p or 0
-            sign = '+' if p_val >= 0 else ''
             try:
-                opened_str = o.strftime('%m-%d %H:%M') if o else 'n/a'
+                opened_str = o.strftime('%d.%m %H:%M') if o else '—'
             except Exception:
-                opened_str = 'n/a'
-            msg += f"  • {sym} {side} @ {opened_str} PnL {sign}${p_val:.2f}\n"
-        msg += (
-            f"\n**Last 7d**: {n} trades, WR {wr:.0f}%, PnL ${pnl:+.2f}\n"
-            f"**Last update**: {state.get('last_update', 'never')[:16]}"
-        )
-        print(msg)
+                opened_str = '—'
+            lines.append(f"  • {sym} {side} {opened_str} {p_val:+.2f}$")
+        lines.append(f"7д: {n} сделок, WR {wr:.0f}%, PnL {pnl:+.2f}$")
+        print("\n".join(lines))
         return
 
     if args.short:
-        print(f"Balance ${free:.2f} | Tier {state.get('tier', 'starter')} | Pos ${state.get('current_pos_usdt', 5):.2f} | Open {len(positions)}/2 | 7d: {n}tr, WR {wr:.0f}%, PnL ${pnl:+.2f}")
+        print(f"${free:.2f} | {max_pos} × ${pos_usd:.2f} | открыто {len(positions)}/{max_pos} | "
+              f"7д: {n} сделок, WR {wr:.0f}%, {pnl:+.2f}$")
         return
     print(f"  COMPOUND DASHBOARD  —  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", flush=True)
     print("="*70, flush=True)
     print(f"  Bybit USDT free:   ${free:.2f}", flush=True)
     print(f"  Bybit USDT total:  ${total:.2f}", flush=True)
-    print(f"  Tier:              {state.get('tier', 'starter')}", flush=True)
-    print(f"  Pos size:          ${state.get('current_pos_usdt', 5):.2f}", flush=True)
-    print(f"  Max exposure:      ${state.get('current_pos_usdt', 5)*2:.2f} (2 concurrent)", flush=True)
+    print(f"  Режим:             {state.get('tier', '—')}", flush=True)
+    print(f"  Размер сделки:     ${pos_usd:.2f}", flush=True)
+    print(f"  Максимум в рынке:  ${max_pos * pos_usd:.2f} ({max_pos} позиций)", flush=True)
     print("-"*70, flush=True)
-    print(f"  Open positions:    {len(positions)}/2", flush=True)
+    print(f"  Open positions:    {len(positions)}/{max_pos}", flush=True)
     for sym, side, p, o in positions:
         sign = '+' if (p or 0) >= 0 else ''
         print(f"    {sym:<10} {side:<6} PnL {sign}${(p or 0):.2f}  opened {o.strftime('%m-%d %H:%M')}", flush=True)
