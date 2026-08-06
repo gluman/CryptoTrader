@@ -187,7 +187,13 @@ STRATEGIES = [
         # активные linear USDT perpetual.
         "symbols": ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
                     "DOGEUSDT", "ADAUSDT",
-                    "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
+                    # [Fix 06.08.2026 Босс] SOXLUSDT убран: Bybit отклоняет ордера
+                    # с retCode 110126 «You must sign the required agreement before
+                    # trading this contract» — это токенизированная акция, для неё
+                    # нужно отдельное согласие в личном кабинете. Сигналы
+                    # генерировались и сгорали (8 отказов подряд 06.08).
+                    # Вернуть можно, подписав соглашение на бирже.
+                    "AKEUSDT", "ZECUSDT", "ENAUSDT",
                     "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
                     "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT",
                     # [30.07.2026] Добавлены 4 новые пары из скрининга V39

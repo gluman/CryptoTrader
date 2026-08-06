@@ -249,7 +249,7 @@ agents:
     # Без этого списка DataCollector не собирает 5m бары для новых пар → scanner skip'ает stale data.
     symbols: ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
               "DOGEUSDT", "ADAUSDT",
-              "AKEUSDT", "SOXLUSDT", "ZECUSDT", "ENAUSDT",
+              "AKEUSDT", "ZECUSDT", "ENAUSDT",   # SOXL убран 06.08: Bybit требует соглашение (retCode 110126)
               "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
               "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT"]
   risk:
