@@ -80,7 +80,7 @@ def sync_close(args):
     
     cur.execute("""
         UPDATE positions SET 
-            status = 'closed',
+            status = 'CLOSED',
             close_price = %s,
             closed_at = %s,
             updated_at = %s
@@ -91,7 +91,7 @@ def sync_close(args):
     result = cur.fetchone()
     if result:
         pos_id, entry_price, quantity, side = result
-        if side == 'long':
+        if (side or '').upper() == 'LONG':
             pnl = (close_price - float(entry_price)) * float(quantity)
         else:
             pnl = (float(entry_price) - close_price) * float(quantity)

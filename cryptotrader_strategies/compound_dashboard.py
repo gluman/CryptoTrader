@@ -22,6 +22,15 @@ from cryptotrader_strategies.db_safe import db_dsn
 DB = db_dsn()
 STATE_PATH = Path('/home/andy/CryptoTrader_main/compound_state.json')
 
+# [07.08.2026] Отчёт фильтровал позиции по notes LIKE '%clone5_v7%' — стратегии,
+# которая не торгует с июля, поэтому всегда показывал 0 сделок. Имя берём из
+# боевого runner, чтобы при следующей смене версии снова не разъехалось.
+try:
+    from cryptotrader_strategies.clone5_multi_runner import STRATEGIES as _S
+    ACTIVE_STRATEGY = _S[0]["name"]
+except Exception:
+    ACTIVE_STRATEGY = "clone5_v9_ctl"
+
 
 def get_balance():
     try:
@@ -45,9 +54,9 @@ def get_v7_positions():
         cur.execute("""
             SELECT symbol, side, unrealized_pnl, opened_at
             FROM positions
-            WHERE exchange='bybit' AND status='open'
-              AND notes LIKE '%clone5_v7%'
-        """)
+            WHERE upper(exchange)='BYBIT' AND upper(status)='OPEN'
+              AND notes LIKE %(strat)s
+        """, {"strat": f"%{ACTIVE_STRATEGY}%"})
         return cur.fetchall()
     finally:
         conn.close()
@@ -64,11 +73,11 @@ def get_v7_recent_pnl(days=7):
               SUM(realized_pnl) as pnl,
               AVG(CASE WHEN realized_pnl > 0 THEN 1.0 ELSE 0.0 END) * 100 as wr
             FROM positions
-            WHERE exchange='bybit'
-              AND status='closed'
-              AND notes LIKE '%clone5_v7%'
+            WHERE upper(exchange)='BYBIT'
+              AND upper(status)='CLOSED'
+              AND notes LIKE %(strat)s
               AND closed_at > NOW() - INTERVAL '{days} days'
-        """)
+        """, {"strat": f"%{ACTIVE_STRATEGY}%"})
         row = cur.fetchone()
         if not row:
             return (0, 0, 0.0, 0.0)

@@ -31,7 +31,7 @@ def get_positions():
     cur.execute("""
         SELECT symbol, side, entry_price, unrealized_pnl
         FROM positions
-        WHERE status = 'OPEN'
+        WHERE upper(status) = 'OPEN'
         ORDER BY symbol
     """)
     open_pos = cur.fetchall()
@@ -40,7 +40,7 @@ def get_positions():
     cur.execute("""
         SELECT symbol, side, realized_pnl
         FROM positions
-        WHERE status = 'CLOSED'
+        WHERE upper(status) = 'CLOSED'
         AND closed_at > NOW() - INTERVAL '24 hours'
         ORDER BY closed_at DESC
     """)

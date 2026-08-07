@@ -155,7 +155,7 @@ def get_state():
         SELECT symbol, side, market_type, leverage, quantity, entry_price,
                unrealized_pnl, unrealized_pnl_percent, opened_at, notes
         FROM positions
-        WHERE status='open'
+        WHERE upper(status)='OPEN'
         ORDER BY opened_at DESC
     """)
     opens = cur.fetchall()
@@ -174,7 +174,7 @@ def get_state():
     cur.execute("""
         SELECT symbol, side, realized_pnl, closed_at, notes
         FROM positions
-        WHERE closed_at > NOW() - INTERVAL '24 hours' AND status='closed'
+        WHERE closed_at > NOW() - INTERVAL '24 hours' AND upper(status)='CLOSED'
         ORDER BY closed_at DESC
     """)
     closed_24h = cur.fetchall()

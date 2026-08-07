@@ -133,7 +133,7 @@ def get_closed_positions(days: int = 7):
         sql = f"""
             SELECT COUNT(*), MAX(closed_at)
             FROM positions
-            WHERE status='closed'
+            WHERE upper(status)='CLOSED'
               AND notes LIKE '%{strat}%'
               AND closed_at > NOW() - INTERVAL '{days} days';
         """

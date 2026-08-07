@@ -143,7 +143,7 @@ try:
     cur.execute("""
         SELECT symbol, side, entry_price, quantity, stop_loss, take_profit,
                unrealized_pnl, opened_at
-        FROM positions WHERE status='OPEN' AND market_type='linear'
+        FROM positions WHERE upper(status)='OPEN' AND market_type='linear'
         ORDER BY symbol
     """)
     db_open = cur.fetchall()
@@ -152,7 +152,7 @@ try:
         SELECT symbol, side, entry_price, close_price, realized_pnl,
                realized_pnl_percent, closed_at AT TIME ZONE 'UTC' AS closed_at_utc, notes
         FROM positions
-        WHERE (status='CLOSED' OR status='closed')
+        WHERE upper(status)='CLOSED'
           AND closed_at > NOW() - INTERVAL '24 hours'
         ORDER BY closed_at DESC
     """)
@@ -310,7 +310,7 @@ try:
     cur2.execute("""
         SELECT symbol, side, realized_pnl, closed_at AT TIME ZONE 'UTC' AS closed_at_utc
         FROM positions
-        WHERE (status='CLOSED' OR status='closed')
+        WHERE upper(status)='CLOSED'
           AND closed_at > NOW() - INTERVAL '1 hour'
         ORDER BY closed_at DESC
     """)
@@ -365,7 +365,7 @@ try:
         cur.execute(f"""
             SELECT COALESCE(SUM(realized_pnl), 0)
             FROM positions
-            WHERE (status='CLOSED' OR status='closed')
+            WHERE upper(status)='CLOSED'
               AND closed_at > NOW() - INTERVAL '{interval}'
         """)
         pnl_by_period[label] = float(cur.fetchone()[0] or 0)
