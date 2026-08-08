@@ -127,7 +127,9 @@ import pandas as pd
 sys.path.insert(0, '/home/andy/CryptoTrader')
 from dotenv import load_dotenv
 load_dotenv('/home/andy/CryptoTrader/.env')
-from cryptotrader_strategies.clone_5_v8 import Clone5V8Strategy
+# [08.08.2026] Импорт Clone5V8Strategy убран: v8 помечена архивной, и здесь она
+# всё равно нигде не использовалась — оставался мёртвый импорт от времён v8a,
+# из-за которого файл выглядел так, будто runner ещё торгует v8.
 from cryptotrader_strategies.clone_5_v9 import Clone5V9Strategy
 from cryptotrader_strategies.db_safe import db_dsn
 DB = db_dsn()
