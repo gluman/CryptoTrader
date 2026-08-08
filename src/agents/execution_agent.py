@@ -378,7 +378,16 @@ class ExecutionAgent(BaseAgent):
                 if active_price is not None:
                     body['activePrice'] = str(active_price)
             resp = ccxt_bybit.private_post_v5_position_trading_stop(body)
-            return {'retCode': resp.get('retCode', -1), 'retMsg': resp.get('retMsg', '')}
+            # FIX 07.08.2026: ccxt отдаёт retCode СТРОКОЙ ('0'), а вызывающий код
+            # сравнивает с числом 0 — успешная установка SL/TP логировалась как
+            # "SL/TP set failed ...: 0 OK". Приводим к int здесь, чтобы все три
+            # места сравнения (1443, 1484, 1988) читали настоящий статус.
+            rc_raw = resp.get('retCode', -1)
+            try:
+                rc = int(rc_raw)
+            except (TypeError, ValueError):
+                rc = -1
+            return {'retCode': rc, 'retMsg': resp.get('retMsg', '')}
         except Exception as e:
             msg = str(e)
             # ccxt заворачивает retCode в исключение; пытаемся извлечь
@@ -421,14 +430,20 @@ class ExecutionAgent(BaseAgent):
         except Exception as e:
             return {'error': str(e)}
 
-    def _bybit_market_sell_ccxt(self, symbol: str, quantity: float) -> Dict:
-        """Place market sell on Bybit via ccxt. Returns {'retCode': 0, 'orderId': ...}."""
+    def _bybit_market_sell_ccxt(self, symbol: str, quantity: float,
+                                reduce_only: bool = False) -> Dict:
+        """Place market sell on Bybit via ccxt. Returns {'retCode': 0, 'orderId': ...}.
+
+        reduce_only=True — для закрытия существующего лонга: Bybit тогда не даст
+        случайно открыть шорт, если переданное количество больше остатка позиции.
+        """
         ccxt_bybit = self._bybit()
         if not ccxt_bybit:
             return {'error': 'ccxt not initialized'}
         try:
             sym = symbol.upper().replace('USDT', '/USDT:USDT')
-            order = ccxt_bybit.create_order(sym, 'market', 'sell', quantity)
+            params = {'reduceOnly': True} if reduce_only else {}
+            order = ccxt_bybit.create_order(sym, 'market', 'sell', quantity, None, params)
             filled = order.get('filled')
             avg = order.get('average')
             return {
@@ -496,6 +511,21 @@ class ExecutionAgent(BaseAgent):
             tp3_node = exit_plan.get("tp3") or {}
             if isinstance(tp3_node, dict) and tp3_node.get("price_pct"):
                 tp_pct = float(tp3_node["price_pct"])
+
+            # FIX 07.08.2026: v9 (clone5_multi_runner.open_signal) кладёт в exit_plan
+            # ПЛОСКИЕ ключи sl_pct/tp_pct, а не узлы {"sl":{"price_pct":...}}. Ключи не
+            # совпадали → override не срабатывал → в БД писались дефолты
+            # default_stop_loss_percent(0.3)/default_take_profit_percent(0.5) + fee_buffer(0.2),
+            # то есть SL −0.5% / TP +0.7%, хотя на бирже стояли настоящие уровни сигнала.
+            # Пока закрытие кодом было сломано, расхождение не проявлялось; после его
+            # починки код-триггеры начали резать позиции по этим узким уровням
+            # (07.08 SUI закрылась на −0.80% при биржевом SL −3.5%).
+            # Вложенный формат оставлен рабочим — плоский имеет приоритет, т.к. именно
+            # его пишет боевая стратегия.
+            if exit_plan.get("sl_pct"):
+                sl_pct = float(exit_plan["sl_pct"])
+            if exit_plan.get("tp_pct"):
+                tp_pct = float(exit_plan["tp_pct"])
 
         # ═══ R23 (08.07.2026): Fee-aware SL/TP calculation ═══
         # SL ниже entry на (sl_pct + fee_buffer) — реальная потеря при hit = sl_pct,
@@ -1046,6 +1076,14 @@ class ExecutionAgent(BaseAgent):
                             self.close_position(db_pos.id, current_price, 'MAX_HOLD')
                             result['triggered'] += 1
                             result['details'].append({'type': 'MAX_HOLD', 'symbol': symbol, 'price': current_price})
+                        else:
+                            # FIX 07.08.2026: раньше ошибка закрытия терялась молча —
+                            # позиция оставалась висеть, а в отчёте стояло "0 sells,
+                            # errors=0", из-за чего сломанное закрытие не было видно
+                            # месяцами. Теперь причина попадает в лог.
+                            self.log('error',
+                                     f"max_hold close FAILED {symbol} qty={qty_left}: "
+                                     f"{close_res.get('error')}")
                     return result
 
                 # TP levels — check in order: TP1, TP2, TP3
@@ -2171,8 +2209,25 @@ class ExecutionAgent(BaseAgent):
             return {'error': str(e)}
 
     def execute_linear_sell(self, symbol: str, quantity: float, exchange: str = 'bybit') -> Dict:
-        """Execute linear futures market sell (close long position)"""
+        """Execute linear futures market sell (close long position).
+
+        FIX 07.08.2026: для bybit шли через self.exchanges['bybit'], которого после
+        ccxt-миграции в словаре НЕТ (там только binance/bitfinex) — метод всегда
+        возвращал {'error': 'No exchange: bybit'}, поэтому max_hold, SL/TP-триггер и
+        pending-sell не могли закрыть ни одной позиции: ошибка возвращалась молча,
+        счётчики triggered/errors не росли, в отчёте стояло "0 sells, errors=0".
+        Позиции спасали только SL/TP, выставленные на самой бирже при открытии.
+        Теперь bybit закрывается через тот же ccxt-клиент, что и открытие, с
+        reduceOnly — чтобы пере-продажа не открыла шорт.
+        """
         try:
+            # exchange приходит из БД в разном регистре ('BYBIT' в positions.exchange,
+            # 'bybit' в дефолте аргумента) — сравнение регистрозависимым быть не должно,
+            # иначе закрытие снова уходит в несуществующий self.exchanges (тот же класс
+            # бага, что status='open' vs 'OPEN', найденный 05.08.2026).
+            if (exchange or '').strip().lower() == 'bybit':
+                return self._bybit_market_sell_ccxt(symbol, quantity, reduce_only=True)
+
             ex = self.exchanges.get(exchange)
             if not ex:
                 return {'error': f'No exchange: {exchange}'}

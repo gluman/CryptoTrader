@@ -185,8 +185,15 @@ STRATEGIES = [
         # имена были с двойным суффиксом «USUSDTUSDT»). Восстановлен состав из git HEAD
         # (19 пар) + добавления V39/V46 от 30.07 (8 пар). Все 27 проверены на Bybit —
         # активные linear USDT perpetual.
+        # [Fix 07.08.2026 Босс] Выведены 6 пар: DOGE, ADA, TAO, BCH, SPCX, BEAT.
+        # Причина — недельный подбор 07.08 по 9 парам, сидевшим на дефолтах: у пяти
+        # из них НИ ОДНА из 144 комбинаций SL/TP/max_hold не даёт плюс одновременно
+        # на train и valid (SPCX — мало данных, 984 бара). При этом они занимали 36%
+        # слотов при лимите 3 позиции и давали −2.56$ за 90д; BEAT в одиночку — 54
+        # слота и −1.27$. Замер: с ними +1.86$ за 90д, без них +4.18$. Минус ADA/TAO/
+        # BEAT устойчив помесячно. Подтвердились и остаются: NEAR, AVAX, GIGGLE.
+        # Вернуть можно, если недельный подбор когда-нибудь их подтвердит.
         "symbols": ["SUIUSDT", "NEARUSDT", "SOLUSDT", "LITUSDT",
-                    "DOGEUSDT", "ADAUSDT",
                     # [Fix 06.08.2026 Босс] SOXLUSDT убран: Bybit отклоняет ордера
                     # с retCode 110126 «You must sign the required agreement before
                     # trading this contract» — это токенизированная акция, для неё
@@ -194,10 +201,10 @@ STRATEGIES = [
                     # генерировались и сгорали (8 отказов подряд 06.08).
                     # Вернуть можно, подписав соглашение на бирже.
                     "AKEUSDT", "ZECUSDT", "ENAUSDT",
-                    "APTUSDT", "TAOUSDT", "AVAXUSDT", "AAVEUSDT",
-                    "BCHUSDT", "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT",
+                    "APTUSDT", "AVAXUSDT", "AAVEUSDT",
+                    "DYDXUSDT", "AXSUSDT", "MAGICUSDT", "KSMUSDT",
                     # [30.07.2026] Добавлены 4 новые пары из скрининга V39
-                    "SPCXUSDT", "BEATUSDT", "KAITOUSDT", "UAIUSDT",
+                    "KAITOUSDT", "UAIUSDT",
                     # [30.07.2026] Добавлены 4 пары из Binance скрининга V46
                     "EULUSDT", "REUSDT", "GIGGLEUSDT", "ETHUSDT"],
         # [Fix 22.07.2026 Босс] min_conf 0.50→0.60 — синхронизировано с clone_5_v7.py params.
