@@ -455,6 +455,123 @@ class ExecutionAgent(BaseAgent):
         except Exception as e:
             return {'error': str(e)}
 
+    def _bybit_price_ccxt(self, symbol: str) -> float:
+        """Текущая цена пары через ccxt. 0.0 если получить не удалось.
+
+        Нужна там, где раньше звали self.exchanges['bybit'].get_ticker() — этого
+        клиента после ccxt-миграции не существует (см. execute_linear_sell).
+        """
+        ccxt_bybit = self._bybit()
+        if not ccxt_bybit:
+            return 0.0
+        try:
+            sym = symbol.upper().replace('USDT', '/USDT:USDT')
+            return float(ccxt_bybit.fetch_ticker(sym).get('last') or 0.0)
+        except Exception as e:
+            self.log('warning', f"_bybit_price_ccxt({symbol}) failed: {e}")
+            return 0.0
+
+    def _bybit_open_short_ccxt(self, symbol: str, amount: str,
+                               sl_pct: Optional[float] = None,
+                               tp_pct: Optional[float] = None,
+                               stop_loss_price: Optional[str] = None,
+                               take_profit_price: Optional[str] = None) -> Dict:
+        """Открытие SHORT на Bybit linear через ccxt — зеркало ccxt-ветки execute_linear_buy.
+
+        FIX 08.08.2026: до этого execute_linear_short целиком работала через
+        self.exchanges.get('bybit'), которого после ccxt-миграции не существует,
+        поэтому шорт НИКОГДА не открывался — функция обрывалась на первой строке
+        с {'error': 'No exchange: bybit'}. Тот же корень, что у сломанного
+        закрытия позиций (см. execute_linear_sell).
+
+        Отличия от лонга: ордер 'sell' БЕЗ reduceOnly (это открытие, а не закрытие),
+        SL выше входа, TP ниже. Bybit V5 требует SL строго выше lastPrice для шорта
+        и TP строго ниже — уровни поджимаются, если проскальзывание нарушило порядок.
+        """
+        try:
+            amount_usdt = float(amount)
+            balance = self._get_bybit_balance_ccxt()
+            if balance['free'] < amount_usdt:
+                return {'error': f'Insufficient balance: ${balance["free"]:.2f} < ${amount_usdt:.2f}'}
+
+            ccxt_bybit = self._bybit()
+            if not ccxt_bybit:
+                return {'error': 'ccxt bybit not initialized'}
+
+            import math
+            sym = symbol.upper().replace('USDT', '/USDT:USDT')
+            ccxt_bybit.load_markets()
+            m = ccxt_bybit.market(sym)
+            price = ccxt_bybit.fetch_ticker(sym).get('last') or 1
+            lsf = (m.get('info', {}) or {}).get('lotSizeFilter', {})
+            step = float(lsf.get('qtyStep') or (m.get('precision', {}) or {}).get('amount') or 0.01)
+            min_qty = float(lsf.get('minOrderQty') or step)
+            min_notional = float(lsf.get('minNotionalValue') or 5.0)
+            target_notional = amount_usdt * self.leverage
+            qty = math.floor((target_notional / price) / step) * step
+            guard = 0
+            while (qty < min_qty or qty * price < min_notional) and guard < 1000:
+                qty = round(qty + step, 10); guard += 1
+            qty = float(f"{qty:.10f}".rstrip('0').rstrip('.') or 0)
+            if qty <= 0:
+                return {'error': f'Computed qty {qty} invalid for {symbol}'}
+
+            try:
+                ccxt_bybit.set_leverage(self.leverage, sym)
+            except Exception as le:
+                if '110043' not in str(le) and 'not modified' not in str(le).lower():
+                    self.log('warning', f"set_leverage({sym},{self.leverage}x): {le}")
+
+            self.log('info', f"SHORT {symbol}: qty={qty} notional=${qty*price:.2f} lev={self.leverage}x")
+            order = ccxt_bybit.create_order(sym, 'market', 'sell', qty)
+            filled = order.get('filled')
+            avg = order.get('average')
+            result = {
+                'retCode': 0,
+                'orderId': order.get('id'),
+                'executed_qty': float(filled) if filled is not None else float(qty),
+                'avgPrice': float(avg) if avg is not None else float(price),
+            }
+            result['cummulative_quote_qty'] = result['executed_qty'] * result['avgPrice']
+
+            # SL/TP на стороне биржи. R23: sl_pct/tp_pct — целевые NET, gross = target + fee_buffer.
+            entry_price = result['avgPrice']
+            if stop_loss_price:
+                sl_abs = float(stop_loss_price)
+            else:
+                sl_gross_pct = (sl_pct if sl_pct is not None else self.default_sl_pct) + self.fee_buffer_pct
+                sl_abs = round(entry_price * (1 + sl_gross_pct / 100), 4)
+
+            if take_profit_price:
+                tp_abs = float(take_profit_price)
+            else:
+                tp_gross_pct = (tp_pct if tp_pct is not None else self.default_tp_pct) + self.fee_buffer_pct
+                tp_abs = round(entry_price * (1 - tp_gross_pct / 100), 4)
+
+            last = float(ccxt_bybit.fetch_ticker(sym).get('last') or entry_price)
+            if sl_abs <= last:                      # SHORT: стоп обязан быть ВЫШЕ цены
+                sl_abs = round(last * 1.001, 4)
+            if tp_abs is not None and tp_abs >= last:   # и тейк — НИЖЕ
+                tp_abs = round(last * 0.999, 4)
+
+            if sl_abs or tp_abs:
+                sl_tp_resp = self._bybit_set_sl_tp(
+                    symbol,
+                    sl_price=str(sl_abs) if sl_abs else None,
+                    tp_price=str(tp_abs) if tp_abs else None,
+                )
+                if sl_tp_resp.get('retCode') == 0:
+                    self.log('info', f"SL/TP set SHORT {symbol}: SL=${sl_abs} TP=${tp_abs}")
+                else:
+                    self.log('warning', f"SL/TP set failed SHORT {symbol}: "
+                                        f"{sl_tp_resp.get('retCode')} {sl_tp_resp.get('retMsg', '')}")
+            result['sl_price'] = sl_abs
+            result['tp_price'] = tp_abs
+            result['side'] = 'SHORT'
+            return result
+        except Exception as e:
+            return {'error': str(e)}
+
     # ==================== Position Management ====================
     
     def get_open_position(self, symbol: str, exchange: str = 'binance') -> Optional[Position]:
@@ -2118,8 +2235,17 @@ class ExecutionAgent(BaseAgent):
         """Open SHORT position on linear perpetuals. Mirrors execute_linear_buy.
 
         H4: если переданы абсолютные stop_loss_price / take_profit_price — уважаем их.
+
+        FIX 08.08.2026: для bybit вся функция раньше упиралась в self.exchanges,
+        которого после ccxt-миграции нет → шорт не открывался никогда. Bybit
+        уходит в ccxt-реализацию; ветка ниже остаётся для binance/bitfinex.
+        Сравнение регистронезависимое — exchange приходит и как 'bybit', и как 'BYBIT'.
         """
         try:
+            if (exchange or '').strip().lower() == 'bybit':
+                return self._bybit_open_short_ccxt(
+                    symbol, amount, sl_pct, tp_pct, stop_loss_price, take_profit_price)
+
             ex = self.exchanges.get(exchange)
             if not ex:
                 return {'error': f'No exchange: {exchange}'}
@@ -2352,9 +2478,26 @@ class ExecutionAgent(BaseAgent):
                     continue
 
                 # Position exists → close it (works for LONG via execute_linear_sell)
-                ex = self.exchanges.get(exchange)
-                ticker = ex.get_ticker(symbol)
-                current_price = float(ticker.get('lastPrice', 0))
+                # FIX 08.08.2026: для bybit здесь звали self.exchanges['bybit'].get_ticker(),
+                # но клиента нет → AttributeError на None, и закрытие по SELL-сигналу
+                # падало ещё до вызова execute_linear_sell. Цена берётся через ccxt.
+                if (exchange or '').strip().lower() == 'bybit':
+                    current_price = self._bybit_price_ccxt(symbol)
+                else:
+                    ex = self.exchanges.get(exchange)
+                    if not ex:
+                        errors += 1
+                        self.log('error', f"SELL close: no exchange client for {exchange}")
+                        self._update_strategy_signal_status(signal_id, 'failed')
+                        continue
+                    ticker = ex.get_ticker(symbol)
+                    current_price = float(ticker.get('lastPrice', 0))
+
+                if current_price <= 0:
+                    errors += 1
+                    self.log('error', f"SELL close: no price for {symbol}")
+                    self._update_strategy_signal_status(signal_id, 'failed')
+                    continue
 
                 qty = float(position.quantity)
                 if position.market_type == 'linear':
