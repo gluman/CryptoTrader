@@ -1,7 +1,7 @@
 {
-  "updated_at": "2026-08-07T20:40:36.611521",
-  "source": "weekly_v9_optim.py — подбор ТОЛЬКО выхода при зафиксированном входе v9 CTL",
-  "method": "90д 5m, центр плато (медиана топ-5), обязателен плюс на train и valid, комиссия 0.11% RT",
+  "updated_at": "2026-08-10T00:03:31.263061",
+  "source": "weekly_v9_optim.py \u2014 \u043f\u043e\u0434\u0431\u043e\u0440 \u0422\u041e\u041b\u042c\u041a\u041e \u0432\u044b\u0445\u043e\u0434\u0430 \u043f\u0440\u0438 \u0437\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u043c \u0432\u0445\u043e\u0434\u0435 v9 CTL",
+  "method": "90\u0434 5m, \u0446\u0435\u043d\u0442\u0440 \u043f\u043b\u0430\u0442\u043e (\u043c\u0435\u0434\u0438\u0430\u043d\u0430 \u0442\u043e\u043f-5), \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u0435\u043d \u043f\u043b\u044e\u0441 \u043d\u0430 train \u0438 valid, \u043a\u043e\u043c\u0438\u0441\u0441\u0438\u044f 0.11% RT",
   "entry": {
     "lookback": 80,
     "sweep_threshold": 0.0005,
@@ -20,235 +20,171 @@
       "tp_pct": 2.0,
       "max_hold_min": 720,
       "backtest_n": 61,
-      "backtest_exp": 0.373,
-      "backtest_wr": 67.2,
+      "backtest_exp": 0.306,
+      "backtest_wr": 65.6,
       "source": "per_pair_confirmed"
     },
     "NEARUSDT": {
       "sl_pct": 2.0,
       "tp_pct": 1.0,
       "max_hold_min": 60,
-      "backtest_n": 79,
-      "backtest_exp": 0.357,
-      "backtest_wr": 77.2,
+      "backtest_n": 80,
+      "backtest_exp": 0.34,
+      "backtest_wr": 75.0,
       "source": "per_pair_confirmed"
     },
     "SOLUSDT": {
       "sl_pct": 3.5,
       "tp_pct": 2.0,
-      "max_hold_min": 180,
-      "backtest_n": 73,
-      "backtest_exp": 0.229,
-      "backtest_wr": 64.4,
+      "max_hold_min": 720,
+      "backtest_n": 72,
+      "backtest_exp": 0.207,
+      "backtest_wr": 65.3,
       "source": "per_pair_confirmed"
     },
     "LITUSDT": {
       "sl_pct": 2.5,
-      "tp_pct": 2.0,
-      "max_hold_min": 180,
-      "backtest_n": 65,
-      "backtest_exp": 0.053,
-      "backtest_wr": 56.9,
+      "tp_pct": 5.0,
+      "max_hold_min": 720,
+      "backtest_n": 49,
+      "backtest_exp": 0.251,
+      "backtest_wr": 38.8,
       "source": "per_pair_confirmed"
-    },
-    "DOGEUSDT": {
-      "sl_pct": 2.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 360,
-      "source": "default_not_confirmed"
-    },
-    "ADAUSDT": {
-      "sl_pct": 2.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 360,
-      "source": "default_not_confirmed"
     },
     "AKEUSDT": {
-      "sl_pct": 1.5,
+      "sl_pct": 1.0,
       "tp_pct": 1.5,
-      "max_hold_min": 180,
-      "backtest_n": 44,
-      "backtest_exp": 0.221,
-      "backtest_wr": 59.1,
-      "source": "per_pair_confirmed"
-    },
-    "SOXLUSDT": {
-      "sl_pct": 1.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 720,
-      "backtest_n": 76,
-      "backtest_exp": 0.369,
-      "backtest_wr": 51.3,
+      "max_hold_min": 60,
+      "backtest_n": 46,
+      "backtest_exp": 0.217,
+      "backtest_wr": 58.7,
       "source": "per_pair_confirmed"
     },
     "ZECUSDT": {
       "sl_pct": 3.5,
       "tp_pct": 5.0,
       "max_hold_min": 360,
-      "backtest_n": 55,
-      "backtest_exp": 1.165,
-      "backtest_wr": 65.5,
+      "backtest_n": 53,
+      "backtest_exp": 1.192,
+      "backtest_wr": 64.2,
       "source": "per_pair_confirmed"
     },
     "ENAUSDT": {
-      "sl_pct": 3.5,
+      "sl_pct": 2.5,
       "tp_pct": 3.5,
       "max_hold_min": 720,
-      "backtest_n": 100,
-      "backtest_exp": 0.659,
-      "backtest_wr": 62.0,
+      "backtest_n": 86,
+      "backtest_exp": 0.672,
+      "backtest_wr": 58.1,
       "source": "per_pair_confirmed"
     },
     "APTUSDT": {
       "sl_pct": 3.5,
       "tp_pct": 3.5,
       "max_hold_min": 720,
-      "backtest_n": 85,
-      "backtest_exp": 0.654,
-      "backtest_wr": 60.0,
+      "backtest_n": 73,
+      "backtest_exp": 0.836,
+      "backtest_wr": 64.4,
       "source": "per_pair_confirmed"
-    },
-    "TAOUSDT": {
-      "sl_pct": 2.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 360,
-      "source": "default_not_confirmed"
     },
     "AVAXUSDT": {
       "sl_pct": 1.5,
       "tp_pct": 3.5,
       "max_hold_min": 360,
-      "backtest_n": 48,
-      "backtest_exp": 0.203,
-      "backtest_wr": 58.3,
+      "backtest_n": 43,
+      "backtest_exp": 0.249,
+      "backtest_wr": 60.5,
       "source": "per_pair_confirmed"
     },
     "AAVEUSDT": {
-      "sl_pct": 2.5,
-      "tp_pct": 1.0,
-      "max_hold_min": 180,
-      "backtest_n": 59,
-      "backtest_exp": 0.156,
-      "backtest_wr": 72.9,
-      "source": "per_pair_confirmed"
-    },
-    "BCHUSDT": {
       "sl_pct": 2.5,
       "tp_pct": 2.5,
       "max_hold_min": 360,
       "source": "default_not_confirmed"
     },
     "DYDXUSDT": {
-      "sl_pct": 1.5,
+      "sl_pct": 2.0,
       "tp_pct": 3.5,
       "max_hold_min": 720,
-      "backtest_n": 67,
-      "backtest_exp": 0.425,
-      "backtest_wr": 49.3,
+      "backtest_n": 57,
+      "backtest_exp": 0.583,
+      "backtest_wr": 56.1,
       "source": "per_pair_confirmed"
     },
     "AXSUSDT": {
       "sl_pct": 3.5,
-      "tp_pct": 2.0,
+      "tp_pct": 2.5,
       "max_hold_min": 360,
-      "backtest_n": 65,
-      "backtest_exp": 0.206,
-      "backtest_wr": 60.0,
+      "backtest_n": 56,
+      "backtest_exp": 0.408,
+      "backtest_wr": 60.7,
       "source": "per_pair_confirmed"
     },
     "MAGICUSDT": {
-      "sl_pct": 3.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 180,
-      "backtest_n": 45,
-      "backtest_exp": 0.5,
-      "backtest_wr": 71.1,
-      "source": "per_pair_confirmed"
-    },
-    "KSMUSDT": {
-      "sl_pct": 3.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 180,
-      "backtest_n": 61,
-      "backtest_exp": 0.618,
-      "backtest_wr": 70.5,
-      "source": "per_pair_confirmed"
-    },
-    "SPCXUSDT": {
-      "sl_pct": 2.5,
-      "tp_pct": 2.5,
-      "max_hold_min": 360,
-      "source": "default_no_data"
-    },
-    "BEATUSDT": {
       "sl_pct": 2.5,
       "tp_pct": 2.5,
       "max_hold_min": 360,
       "source": "default_not_confirmed"
     },
-    "KAITOUSDT": {
+    "KSMUSDT": {
       "sl_pct": 3.5,
+      "tp_pct": 2.0,
+      "max_hold_min": 720,
+      "backtest_n": 55,
+      "backtest_exp": 0.456,
+      "backtest_wr": 63.6,
+      "source": "per_pair_confirmed"
+    },
+    "KAITOUSDT": {
+      "sl_pct": 2.5,
       "tp_pct": 2.5,
       "max_hold_min": 720,
-      "backtest_n": 43,
-      "backtest_exp": 0.829,
-      "backtest_wr": 72.1,
+      "backtest_n": 59,
+      "backtest_exp": 0.34,
+      "backtest_wr": 59.3,
       "source": "per_pair_confirmed"
     },
     "UAIUSDT": {
       "sl_pct": 2.0,
       "tp_pct": 5.0,
       "max_hold_min": 720,
-      "backtest_n": 68,
-      "backtest_exp": 0.448,
-      "backtest_wr": 38.2,
+      "backtest_n": 57,
+      "backtest_exp": 0.695,
+      "backtest_wr": 42.1,
       "source": "per_pair_confirmed"
     },
     "EULUSDT": {
       "sl_pct": 2.5,
       "tp_pct": 2.0,
       "max_hold_min": 180,
-      "backtest_n": 41,
-      "backtest_exp": 0.148,
-      "backtest_wr": 56.1,
+      "backtest_n": 46,
+      "backtest_exp": 0.124,
+      "backtest_wr": 52.2,
       "source": "per_pair_confirmed"
     },
     "REUSDT": {
       "sl_pct": 3.5,
       "tp_pct": 3.5,
       "max_hold_min": 360,
-      "backtest_n": 65,
-      "backtest_exp": 0.302,
-      "backtest_wr": 61.5,
+      "backtest_n": 66,
+      "backtest_exp": 0.329,
+      "backtest_wr": 62.1,
       "source": "per_pair_confirmed"
     },
     "GIGGLEUSDT": {
       "sl_pct": 1.0,
       "tp_pct": 2.5,
       "max_hold_min": 360,
-      "backtest_n": 52,
-      "backtest_exp": 0.09,
-      "backtest_wr": 36.5,
+      "backtest_n": 39,
+      "backtest_exp": 0.132,
+      "backtest_wr": 38.5,
       "source": "per_pair_confirmed"
     },
     "ETHUSDT": {
-      "sl_pct": 3.5,
+      "sl_pct": 2.5,
       "tp_pct": 2.5,
       "max_hold_min": 360,
-      "backtest_n": 74,
-      "backtest_exp": 0.168,
-      "backtest_wr": 62.2,
-      "source": "per_pair_confirmed"
+      "source": "default_not_confirmed"
     }
-  },
-  "last_partial_run": {
-    "at": "2026-08-07T20:40:36.611539",
-    "scope": "9 пар на дефолтах: NEARUSDT, DOGEUSDT, ADAUSDT, TAOUSDT, AVAXUSDT, BCHUSDT, SPCXUSDT, BEATUSDT, GIGGLEUSDT",
-    "confirmed": [
-      "NEARUSDT",
-      "AVAXUSDT",
-      "GIGGLEUSDT"
-    ],
-    "note": "17 подтверждённых пар не пересчитывались — их записи перенесены без изменений"
   }
 }
