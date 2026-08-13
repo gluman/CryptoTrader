@@ -52,3 +52,8 @@ logs/*.log.*
 *.bak.*
 reports/
 config/per_pair_params_backups/
+
+# [13.08.2026] Runtime-состояние LLM-фильтра режима: кэш вердиктов обновляется
+# раз в 6 часов, история пишется на каждое окно — в репозитории им делать нечего.
+config/llm_regime_cache.json
+logs/llm_regime_history.jsonl

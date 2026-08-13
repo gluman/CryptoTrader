@@ -777,11 +777,45 @@ def scan_strategy(cfg: dict) -> int:
     if llm_mode == "off":
         print(f"  ⚙ Mode M: механика решает сама, LLM не участвует", flush=True)
 
+    # ═══ [13.08.2026 Босс] LLM-фильтр рыночного режима, раз в 6 часов ═══
+    # Не судит отдельный сетап (та схема проверена и отклонена: LLM отбирала хуже
+    # случайного), а раз в 6ч решает по КАЖДОЙ ПАРЕ — торговать её или нет.
+    # Смысл в дефиците слотов: лимит 3 позиции пропускает ~480 сигналов из 1650,
+    # и очередь берёт худшие. Отсев части пар до очереди отдаёт слоты лучшим.
+    # Замер 90д портфельно: +1.25$ → +2.21$ при просадке −2.72$ → −2.24$.
+    # Оговорки и полные цифры — в шапке llm_regime_gate.py.
+    # FAIL-OPEN: любая ошибка LLM → фильтр не мешает, торгуем как раньше.
+    regime_verdicts = {}
+    try:
+        from cryptotrader_strategies.llm_regime_gate import ensure_verdicts, is_allowed
+        regime_verdicts = ensure_verdicts(
+            cfg["symbols"],
+            get_df=lambda s: get_ohlcv(s, lookback_bars=300),
+            trends=trends,
+        )
+        if regime_verdicts:
+            blocked = sorted(s for s, d in regime_verdicts.items() if d == "AVOID")
+            print(f"  🧭 LLM-режим: разрешено "
+                  f"{sum(1 for d in regime_verdicts.values() if d != 'AVOID')}/"
+                  f"{len(regime_verdicts)}"
+                  + (f", заблокированы: {', '.join(blocked)}" if blocked else ""), flush=True)
+        else:
+            print("  🧭 LLM-режим: вердиктов нет — фильтр пропускает всё", flush=True)
+    except Exception as e:
+        print(f"  ⚠ LLM-режим недоступен ({e}) — торгуем без фильтра", flush=True)
+
+        def is_allowed(_s, _v):  # noqa: E306 — fail-open заглушка
+            return True
+
     # ═══ R18: LLM HYBRID gate (Mode C) — fallback для low-vol ═══
     # M3 LLM загружается lazily — импорт только если будет non-HOLD candidate.
     llm_gate = None  # импортируется при первом non-HOLD (см. ниже)
 
     for sym in cfg["symbols"]:
+        # LLM-фильтр режима: пара выключена на текущее 6-часовое окно
+        if not is_allowed(sym, regime_verdicts):
+            print(f"  ⊘ {sym}: LLM-режим AVOID на это окно", flush=True)
+            continue
         # R3 FIX: глобальный лимит одновременных позиций
         open_total = count_open_positions()
         if open_total + signals >= MAX_CONCURRENT:
