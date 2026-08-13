@@ -257,6 +257,13 @@ agents:
     min_position_usd: 5.0
     max_position_usd: 5.0        # fixed minimal notional margin (read by execution_agent.position_usd)
     leverage: 1                  # 1x — no liquidation risk (read by execution_agent.leverage)
+    # [13.08.2026 Босс] Потолок раздувания позиции минимальным лотом биржи.
+    # Bybit не даёт купить меньше minOrderQty: для дорогих монет плановые $5
+    # превращаются в куда большую позицию (ETH ×3.78 = $18.88 — из-за этого
+    # 11.08 встала торговля: маржи не осталось). Сигнал отбрасывается, если
+    # номинал превышает план во столько раз. Замер 13.08 при $5: ETH ×3.78
+    # (пара убрана), ZEC ×1.94, SOL ×1.52, SUI ×1.37, прочие 16 пар ≤×1.08.
+    max_position_oversize: 2.0
     min_confidence_for_max_size: 0.70    # [Fix 17.07.2026 Босс] 0.55→0.70: регрессия показала 25% WR, нужно больше качества
     # ═══ R23 (08.07.2026): floors учитывают fee buffer ═══
     # Bybit linear fee = 0.055% per side × 2 = 0.11% round-trip.

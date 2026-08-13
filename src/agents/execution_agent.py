@@ -26,6 +26,9 @@ class ExecutionAgent(BaseAgent):
         # Fixed minimal position size (notional margin at `leverage`x). 2026-05-27 go-live minimal.
         self.position_usd = float(risk_cfg.get('max_position_usd', 5.0))
         self.leverage = int(risk_cfg.get('leverage', 1))
+        # [13.08.2026] Во сколько раз позиция может превысить план из-за минимального
+        # лота биржи, прежде чем сигнал будет отброшен. См. execute_linear_buy.
+        self.max_position_oversize = float(risk_cfg.get('max_position_oversize', 2.0))
         self.default_sl_pct = risk_cfg.get('default_stop_loss_percent', 2.0)
         self.default_tp_pct = risk_cfg.get('default_take_profit_percent', 4.0)
         self.sl_atr_multiplier = risk_cfg.get('sl_atr_multiplier', 1.0)
@@ -2060,6 +2063,35 @@ class ExecutionAgent(BaseAgent):
                 qty = float(f"{qty:.10f}".rstrip('0').rstrip('.') or 0)
                 if qty <= 0:
                     return {'error': f'Computed qty {qty} invalid for {symbol}'}
+
+                # ═══ [13.08.2026 Босс] Защита от раздувания позиции минимальным лотом ═══
+                # Цикл выше поднимает qty до minOrderQty/minNotionalValue биржи, не
+                # спрашивая, во что превратился номинал. Для дорогих монет это ломает
+                # весь риск-расчёт: 11.08 ETHUSDT открылась на $18.88 вместо плановых
+                # $5 (min lot 0.01 ETH при цене $1888) — позиция заняла почти весь
+                # депозит, свободно осталось $3.49, и 9 из 12 сигналов за день были
+                # отброшены за нехваткой маржи. Риск на той сделке был втрое выше
+                # расчётного: SL −2.7% стоил бы −$0.51 вместо −$0.135.
+                # Порог берётся из risk.max_position_oversize (по умолчанию 2.0).
+                # На 13.08 при $5: ETH ×3.78 (убран из списка), ZEC ×1.94, SOL ×1.52,
+                # SUI ×1.37, остальные 16 пар ≤×1.08 — порог 2.0 ловит ETH-класс,
+                # не выбрасывая рабочие пары.
+                real_notional = qty * price
+                max_notional = target_notional * self.max_position_oversize
+                if real_notional > max_notional:
+                    self.log('warning',
+                             f"Skip {symbol}: min lot {qty} × ${price:.4f} = "
+                             f"${real_notional:.2f} — это ×{real_notional/target_notional:.2f} "
+                             f"от плановых ${target_notional:.2f} "
+                             f"(лимит ×{self.max_position_oversize})")
+                    return {'error': f'Min lot oversize: ${real_notional:.2f} > '
+                                     f'${max_notional:.2f} for {symbol}'}
+                if real_notional > target_notional * 1.2:
+                    self.log('info',
+                             f"{symbol}: позиция ${real_notional:.2f} против плановых "
+                             f"${target_notional:.2f} (×{real_notional/target_notional:.2f}) "
+                             f"— минимальный лот биржи")
+
                 # Set leverage explicitly — Bybit account leverage "sticks" between orders.
                 try:
                     ccxt_bybit.set_leverage(self.leverage, sym)
